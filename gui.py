@@ -21,6 +21,14 @@ from walkforward import WalkForwardBacktester
 
 import numbers  # for robust timestamp conversion
 
+# Timezone support
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from pytz import timezone as ZoneInfo
+
+IST = ZoneInfo("Asia/Kolkata")
+
 logging.basicConfig(level=logging.INFO)
 
 symbol_data = load_symbol_master(str(data_path("symbol_master.json")))
@@ -135,8 +143,7 @@ def open_historical_data_window(parent):
     Button(win, text="Close", command=win.destroy).pack(pady=10)
 
 def to_human_time(ts):
-    import numbers
-    from datetime import datetime
+    # Display timestamp as IST (Fyers API is UTC epoch seconds)
     try:
         if ts is None:
             return ""
@@ -145,9 +152,21 @@ def to_human_time(ts):
                 return ""
             if ts < 100000000:
                 return str(ts)
-            return datetime.fromtimestamp(float(ts)).strftime('%Y-%m-%d %H:%M:%S')
+            dt_utc = datetime.utcfromtimestamp(float(ts))
+            try:
+                dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+            except Exception:
+                import pytz
+                dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
+            return dt_ist.strftime('%Y-%m-%d %H:%M:%S')
         if isinstance(ts, str) and ts.isdigit():
-            return datetime.fromtimestamp(float(ts)).strftime('%Y-%m-%d %H:%M:%S')
+            dt_utc = datetime.utcfromtimestamp(float(ts))
+            try:
+                dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+            except Exception:
+                import pytz
+                dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
+            return dt_ist.strftime('%Y-%m-%d %H:%M:%S')
         return str(ts)
     except Exception:
         return str(ts)

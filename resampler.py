@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from project_paths import data_path
 
 try:
@@ -80,54 +80,43 @@ def resample(data, interval_minutes):
     """
     if not data:
         return []
-    # Prepare: ensure data is sorted by timestamp
-    data = sorted(data, key=lambda x: x['timestamp'])
+    # Convert data to DataFrame for easier handling
+    import pandas as pd
+    df = pd.DataFrame(data)
+    if df.empty:
+        return []
+    # Explicitly cast 'timestamp' to int to avoid pandas FutureWarning
+    df['timestamp'] = df['timestamp'].astype(int)
+    # Convert 'timestamp' to UTC datetime and then to IST
+    df['dt_ist'] = pd.to_datetime(df['timestamp'].astype(int), unit='s', utc=True).dt.tz_convert(IST)
+    # Group data by trading day (in IST)
     out = []
-    bucket = []
-    current_start = None
-    for row in data:
-        # Convert timestamp to UTC datetime
-        ts = row['timestamp']
-        if isinstance(ts, str):
-            ts = int(ts)
-        dt_utc = datetime.utcfromtimestamp(ts)
-        # Now convert to IST for bucket interval calculation
-        try:
-            dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
-        except Exception:
-            import pytz
-            dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
-        # Compute interval start for this row in IST
-        interval_start_ist = dt_ist.replace(minute=(dt_ist.minute // interval_minutes) * interval_minutes, second=0, microsecond=0)
-        if current_start is None:
-            current_start = interval_start_ist
-        if interval_start_ist != current_start and bucket:
-            out.append(aggregate_bucket(bucket, current_start))
-            bucket = []
-            current_start = interval_start_ist
-        bucket.append(row)
-    # Last bucket
-    if bucket:
-        out.append(aggregate_bucket(bucket, current_start))
+    for trade_date, day_df in df.groupby(df['dt_ist'].dt.date):
+        session_start = datetime.combine(trade_date, time(9, 15), IST)
+        session_end = datetime.combine(trade_date, time(15, 25), IST)
+        bucket_start = session_start
+        while bucket_start < session_end:
+            bucket_end = bucket_start + timedelta(minutes=interval_minutes)
+            if bucket_end > session_end + timedelta(minutes=1):  # ensure we don't overshoot last interval
+                break
+            mask = (day_df['dt_ist'] >= bucket_start) & (day_df['dt_ist'] < bucket_end)
+            bucket = day_df[mask]
+            if not bucket.empty:
+                # Aggregate the bucket
+                try:
+                    utc_bucket_start = bucket_start.astimezone(ZoneInfo("UTC"))
+                except Exception:
+                    import pytz
+                    utc_bucket_start = bucket_start.astimezone(pytz.UTC)
+                out.append({
+                    "id": int(bucket.iloc[0].get("id", 0)),
+                    "symbol": bucket.iloc[0]["symbol"],
+                    "timestamp": int(utc_bucket_start.timestamp()),
+                    "open": float(bucket.iloc[0]["open"]),
+                    "high": float(bucket["high"].max()),
+                    "low": float(bucket["low"].min()),
+                    "close": float(bucket.iloc[-1]["close"]),
+                    "volume": float(bucket["volume"].sum()),
+                })
+            bucket_start += timedelta(minutes=interval_minutes)
     return out
-
-def aggregate_bucket(bucket, interval_start):
-    """Aggregate a list of OHLCV rows into a single OHLCV row for the bucket."""
-    # Store timestamp as UTC epoch (for consistent downstream usage),
-    # but round-trip through IST, so display works as IST.
-    # interval_start is a datetime in IST, so convert back to UTC epoch
-    try:
-        utc_interval_start = interval_start.astimezone(ZoneInfo("UTC"))
-    except Exception:
-        import pytz
-        utc_interval_start = interval_start.astimezone(pytz.UTC)
-    return {
-        "id": bucket[0].get("id", None),
-        "symbol": bucket[0]["symbol"],
-        "timestamp": int(utc_interval_start.timestamp()),
-        "open": bucket[0]["open"],
-        "high": max(row["high"] for row in bucket),
-        "low": min(row["low"] for row in bucket),
-        "close": bucket[-1]["close"],
-        "volume": sum(row["volume"] for row in bucket),
-    }

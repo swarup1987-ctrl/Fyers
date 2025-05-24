@@ -76,8 +76,8 @@ class Intraday15MinStrategy:
         macd_signal=9,
         atr_period=14,
         use_cycore=True,
-        initial_threshold_pct=0.7,   # now user-configurable, in percent
-        initial_checkpoint_pct=0.5   # now user-configurable, in percent
+        initial_threshold_pct=0.7,   # now user-configurable, in percent (can be None)
+        initial_checkpoint_pct=0.5   # now user-configurable, in percent (can be None)
     ):
         self.bb_period = bb_period
         self.bb_std_dev = bb_std_dev
@@ -87,8 +87,9 @@ class Intraday15MinStrategy:
         self.macd_signal = macd_signal
         self.atr_period = atr_period
         self.use_cycore = use_cycore and CYTHON_AVAILABLE
-        self.initial_threshold_pct = initial_threshold_pct / 100
-        self.initial_checkpoint_pct = initial_checkpoint_pct / 100
+        # Accept None for trailing params
+        self.initial_threshold_pct = (initial_threshold_pct / 100) if initial_threshold_pct is not None else None
+        self.initial_checkpoint_pct = (initial_checkpoint_pct / 100) if initial_checkpoint_pct is not None else None
 
     def get_params(self):
         return {
@@ -99,15 +100,15 @@ class Intraday15MinStrategy:
             'macd_slow': self.macd_slow,
             'macd_signal': self.macd_signal,
             'atr_period': self.atr_period,
-            'initial_threshold_pct': self.initial_threshold_pct * 100,
-            'initial_checkpoint_pct': self.initial_checkpoint_pct * 100,
+            'initial_threshold_pct': (self.initial_threshold_pct * 100) if self.initial_threshold_pct is not None else None,
+            'initial_checkpoint_pct': (self.initial_checkpoint_pct * 100) if self.initial_checkpoint_pct is not None else None,
         }
 
     def set_params(self, **kwargs):
         for k, v in kwargs.items():
             if hasattr(self, k):
                 if k in ["initial_threshold_pct", "initial_checkpoint_pct"]:
-                    setattr(self, k, v / 100 if v > 1 else v)
+                    setattr(self, k, (v / 100) if (v is not None and v > 1) else (v if v is not None else None))
                 else:
                     setattr(self, k, v)
 
@@ -212,11 +213,21 @@ class Intraday15MinStrategy:
         }, index=df.index)
         return signals_df
 
-    def backtest_on_signals(self, df, signals):
-        # === Trailing/Checkpoint Parameters ===
+    def backtest_on_signals(self, df, signals, disable_trailing=False):
+        """
+        If disable_trailing is True, only use initial stop/target (no trailing).
+        Otherwise, use the trailing logic with user-supplied thresholds/checkpoints.
+        """
         n_steps = 5
-        CHECKPOINT_STEP_PCT = self.initial_checkpoint_pct   # e.g., 0.005 for 0.5%
-        THRESHOLDS_PCT = [self.initial_threshold_pct * (i+1) for i in range(n_steps)]
+        # Set trailing params to None if disable_trailing, otherwise use self values (or fallback)
+        if disable_trailing or self.initial_threshold_pct is None or self.initial_checkpoint_pct is None:
+            use_trailing = False
+            CHECKPOINT_STEP_PCT = 0.0  # doesn't matter
+            THRESHOLDS_PCT = [0.0] * n_steps  # doesn't matter
+        else:
+            use_trailing = True
+            CHECKPOINT_STEP_PCT = self.initial_checkpoint_pct
+            THRESHOLDS_PCT = [self.initial_threshold_pct * (i+1) for i in range(n_steps)]
 
         in_trade = False
         trades = []
@@ -282,36 +293,37 @@ class Intraday15MinStrategy:
                             exit_reason = "Target"
                             break
 
-                    # 3. Check for threshold crossing, update checkpoint and stop if crossed
-                    threshold_crossed = False
-                    while step_num < len(THRESHOLDS_PCT):
-                        threshold_price = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
-                        if (direction == "BUY" and high >= threshold_price) or (direction == "SELL" and low <= threshold_price):
-                            # Move checkpoint and stop
-                            step_num += 1
-                            new_checkpoint = entry_price * (1 + CHECKPOINT_STEP_PCT * step_num) if direction == "BUY" else entry_price * (1 - CHECKPOINT_STEP_PCT * step_num)
-                            current_checkpoint = new_checkpoint
-                            checkpoint_history.append(new_checkpoint)
-                            # Move stop loss as well
-                            stop_loss = new_checkpoint
-                            # Advance next threshold if more remain
-                            if step_num < len(THRESHOLDS_PCT):
-                                next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
-                            threshold_crossed = True
-                        else:
-                            break
-                    # 4. If price falls back to checkpoint after threshold crossing, exit
-                    if step_num > 0:
-                        if direction == "BUY" and low <= current_checkpoint:
-                            exit_idx = j
-                            exit_price = current_checkpoint
-                            exit_reason = f"CheckpointLock (step {step_num})"
-                            break
-                        elif direction == "SELL" and high >= current_checkpoint:
-                            exit_idx = j
-                            exit_price = current_checkpoint
-                            exit_reason = f"CheckpointLock (step {step_num})"
-                            break
+                    if use_trailing:
+                        # 3. Check for threshold crossing, update checkpoint and stop if crossed
+                        threshold_crossed = False
+                        while step_num < len(THRESHOLDS_PCT):
+                            threshold_price = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
+                            if (direction == "BUY" and high >= threshold_price) or (direction == "SELL" and low <= threshold_price):
+                                # Move checkpoint and stop
+                                step_num += 1
+                                new_checkpoint = entry_price * (1 + CHECKPOINT_STEP_PCT * step_num) if direction == "BUY" else entry_price * (1 - CHECKPOINT_STEP_PCT * step_num)
+                                current_checkpoint = new_checkpoint
+                                checkpoint_history.append(new_checkpoint)
+                                # Move stop loss as well
+                                stop_loss = new_checkpoint
+                                # Advance next threshold if more remain
+                                if step_num < len(THRESHOLDS_PCT):
+                                    next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
+                                threshold_crossed = True
+                            else:
+                                break
+                        # 4. If price falls back to checkpoint after threshold crossing, exit
+                        if step_num > 0:
+                            if direction == "BUY" and low <= current_checkpoint:
+                                exit_idx = j
+                                exit_price = current_checkpoint
+                                exit_reason = f"CheckpointLock (step {step_num})"
+                                break
+                            elif direction == "SELL" and high >= current_checkpoint:
+                                exit_idx = j
+                                exit_price = current_checkpoint
+                                exit_reason = f"CheckpointLock (step {step_num})"
+                                break
 
                 if exit_idx is None:
                     exit_idx = len(df) - 1

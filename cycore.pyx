@@ -1,5 +1,4 @@
 # cycore.pyx - Cython-accelerated core for fast trade simulation
-
 import numpy as np
 cimport numpy as np
 
@@ -12,17 +11,23 @@ def simulate_trades_core(
     np.ndarray[np.float64_t, ndim=1] arr_entry_price,
     np.ndarray[np.float64_t, ndim=1] arr_stop_loss,
     np.ndarray[np.float64_t, ndim=1] arr_target1,
-    double capital_start
+    double capital_start,
+    bint disable_trailing = False,             # NEW: disable trailing logic if True
+    double checkpoint_step_pct = 0.5 / 100,    # e.g. 0.005 for 0.5%
+    double threshold_pct = 0.7 / 100           # e.g. 0.007 for 0.7%
 ):
     # === Trailing/Checkpoint Parameters ===
-    cdef double CHECKPOINT_STEP_PCT = 0.5 / 100    # 0.5%
-    cdef double THRESHOLDS_PCT[5]
-    THRESHOLDS_PCT[0] = 0.7 / 100
-    THRESHOLDS_PCT[1] = 1.4 / 100
-    THRESHOLDS_PCT[2] = 2.1 / 100
-    THRESHOLDS_PCT[3] = 2.8 / 100
-    THRESHOLDS_PCT[4] = 3.5 / 100
     cdef int N_THRESH = 5
+    cdef double CHECKPOINT_STEP_PCT
+    cdef double THRESHOLDS_PCT[5]
+    if disable_trailing:
+        CHECKPOINT_STEP_PCT = 0.0
+        for i in range(N_THRESH):
+            THRESHOLDS_PCT[i] = 0.0
+    else:
+        CHECKPOINT_STEP_PCT = checkpoint_step_pct
+        for i in range(N_THRESH):
+            THRESHOLDS_PCT[i] = threshold_pct * (i + 1)
 
     cdef Py_ssize_t n = arr_high.shape[0]
     cdef Py_ssize_t i, j, entry_idx, exit_idx
@@ -99,41 +104,43 @@ def simulate_trades_core(
                         exit_price = target1
                         exit_reason = "Target"
                         break
-                # 3. Trailing threshold/step logic
-                while step_num < N_THRESH:
-                    if direction == "BUY":
-                        threshold_price = entry_price * (1.0 + THRESHOLDS_PCT[step_num])
-                        if high >= threshold_price:
-                            step_num += 1
-                            # Move checkpoint and stop
-                            current_checkpoint = entry_price * (1.0 + CHECKPOINT_STEP_PCT * step_num)
-                            stop_loss = current_checkpoint
-                            if step_num < N_THRESH:
-                                next_threshold = entry_price * (1.0 + THRESHOLDS_PCT[step_num])
+
+                if not disable_trailing:
+                    # 3. Trailing threshold/step logic
+                    while step_num < N_THRESH:
+                        if direction == "BUY":
+                            threshold_price = entry_price * (1.0 + THRESHOLDS_PCT[step_num])
+                            if high >= threshold_price:
+                                step_num += 1
+                                # Move checkpoint and stop
+                                current_checkpoint = entry_price * (1.0 + CHECKPOINT_STEP_PCT * step_num)
+                                stop_loss = current_checkpoint
+                                if step_num < N_THRESH:
+                                    next_threshold = entry_price * (1.0 + THRESHOLDS_PCT[step_num])
+                            else:
+                                break
                         else:
+                            threshold_price = entry_price * (1.0 - THRESHOLDS_PCT[step_num])
+                            if low <= threshold_price:
+                                step_num += 1
+                                current_checkpoint = entry_price * (1.0 - CHECKPOINT_STEP_PCT * step_num)
+                                stop_loss = current_checkpoint
+                                if step_num < N_THRESH:
+                                    next_threshold = entry_price * (1.0 - THRESHOLDS_PCT[step_num])
+                            else:
+                                break
+                    # 4. Pullback to checkpoint
+                    if step_num > 0:
+                        if direction == "BUY" and low <= current_checkpoint:
+                            exit_idx = j
+                            exit_price = current_checkpoint
+                            exit_reason = f"CheckpointLock (step {step_num})"
                             break
-                    else:
-                        threshold_price = entry_price * (1.0 - THRESHOLDS_PCT[step_num])
-                        if low <= threshold_price:
-                            step_num += 1
-                            current_checkpoint = entry_price * (1.0 - CHECKPOINT_STEP_PCT * step_num)
-                            stop_loss = current_checkpoint
-                            if step_num < N_THRESH:
-                                next_threshold = entry_price * (1.0 - THRESHOLDS_PCT[step_num])
-                        else:
+                        elif direction == "SELL" and high >= current_checkpoint:
+                            exit_idx = j
+                            exit_price = current_checkpoint
+                            exit_reason = f"CheckpointLock (step {step_num})"
                             break
-                # 4. Pullback to checkpoint
-                if step_num > 0:
-                    if direction == "BUY" and low <= current_checkpoint:
-                        exit_idx = j
-                        exit_price = current_checkpoint
-                        exit_reason = f"CheckpointLock (step {step_num})"
-                        break
-                    elif direction == "SELL" and high >= current_checkpoint:
-                        exit_idx = j
-                        exit_price = current_checkpoint
-                        exit_reason = f"CheckpointLock (step {step_num})"
-                        break
             if exit_idx == -1:
                 exit_idx = n-1
                 exit_price = arr_close[exit_idx]

@@ -364,10 +364,10 @@ def open_backtest_window(parent):
     thresh_ckpt_frame = Frame(win)
     thresh_ckpt_frame.pack(pady=10)
     Label(thresh_ckpt_frame, text="Threshold (%):").pack(side=LEFT, padx=5)
-    threshold_var = StringVar(value="0.7")
+    threshold_var = StringVar(value="")
     Entry(thresh_ckpt_frame, width=6, textvariable=threshold_var).pack(side=LEFT, padx=2)
     Label(thresh_ckpt_frame, text="Checkpoint (%):").pack(side=LEFT, padx=5)
-    checkpoint_var = StringVar(value="0.5")
+    checkpoint_var = StringVar(value="")
     Entry(thresh_ckpt_frame, width=6, textvariable=checkpoint_var).pack(side=LEFT, padx=2)
 
     # --- Sampler selection for smart grid search ---
@@ -459,8 +459,8 @@ def open_backtest_window(parent):
         sampler = sampler_var.get()
         n_trials = n_trials_var.get()
         n_random_trials = n_random_trials_var.get()
-        threshold_str = threshold_var.get()
-        checkpoint_str = checkpoint_var.get()
+        threshold_str = threshold_var.get().strip()
+        checkpoint_str = checkpoint_var.get().strip()
         if not symbol:
             messagebox.showwarning("Warning", "Please select a symbol.")
             return
@@ -470,14 +470,21 @@ def open_backtest_window(parent):
         if not strategy_key:
             messagebox.showwarning("Warning", "Please select a strategy.")
             return
-        try:
-            threshold_pct = float(threshold_str)
-            checkpoint_pct = float(checkpoint_str)
-            if threshold_pct <= 0 or checkpoint_pct <= 0:
-                raise ValueError
-        except Exception:
-            messagebox.showwarning("Warning", "Please enter valid positive numbers for Threshold and Checkpoint (%).")
-            return
+
+        # Make threshold/checkpoint optional
+        use_trailing = bool(threshold_str and checkpoint_str)
+        threshold_pct = None
+        checkpoint_pct = None
+
+        if use_trailing:
+            try:
+                threshold_pct = float(threshold_str)
+                checkpoint_pct = float(checkpoint_str)
+                if threshold_pct <= 0 or checkpoint_pct <= 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showwarning("Warning", "Please enter valid positive numbers for Threshold and Checkpoint (%), or leave both empty.")
+                return
 
         # Progress bar window
         progress_win = Toplevel(win)
@@ -528,7 +535,8 @@ def open_backtest_window(parent):
                     n_trials=n_trials,
                     n_random_trials=n_random_trials,
                     initial_threshold_pct=threshold_pct,
-                    initial_checkpoint_pct=checkpoint_pct
+                    initial_checkpoint_pct=checkpoint_pct,
+                    disable_trailing=not use_trailing  # <--- Pass flag to backtester/strategy
                 )
                 results = backtester.run_backtest()
                 stats = results["stats"]

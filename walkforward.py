@@ -26,8 +26,9 @@ class WalkForwardBacktester:
         n_trials=50,
         n_random_trials=20,
         log_file="walkforward_windows.log",
-        initial_threshold_pct=0.7,    # User-supplied, default 0.7%
-        initial_checkpoint_pct=0.5    # User-supplied, default 0.5%
+        initial_threshold_pct=None,    # Now can be None
+        initial_checkpoint_pct=None,   # Now can be None
+        disable_trailing=False         # New flag: true disables trailing logic
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -45,6 +46,7 @@ class WalkForwardBacktester:
         self.log_file = log_file
         self.initial_threshold_pct = initial_threshold_pct
         self.initial_checkpoint_pct = initial_checkpoint_pct
+        self.disable_trailing = disable_trailing
 
         self.strategy_cls = STRATEGY_MAP.get(strategy_key)
         if self.strategy_cls is None:
@@ -143,10 +145,12 @@ class WalkForwardBacktester:
             test_df = test_df.reset_index(drop=True)
             signals = signals.reset_index(drop=True)
 
+            # Updated: Pass disable_trailing flag and raw (possibly None) thresholds
             trades, equity, win, loss, gross_profit, gross_loss, max_drawdown = self.simulate_trades(
                 test_df, signals, capital,
                 initial_threshold_pct=self.initial_threshold_pct,
-                initial_checkpoint_pct=self.initial_checkpoint_pct
+                initial_checkpoint_pct=self.initial_checkpoint_pct,
+                disable_trailing=self.disable_trailing
             )
             all_trades.extend(trades)
             equity_curve.extend(equity)
@@ -212,11 +216,14 @@ class WalkForwardBacktester:
             "param_log": param_log
         }
 
-    def simulate_trades(self, df, signals, capital, initial_threshold_pct=0.7, initial_checkpoint_pct=0.5):
-        # Use user input for thresholds/checkpoint; defaults given for backward compatibility
+    def simulate_trades(self, df, signals, capital, initial_threshold_pct=0.7, initial_checkpoint_pct=0.5, disable_trailing=False):
+        """
+        If disable_trailing is True, only use initial stop/target (no trailing).
+        Otherwise, use the trailing logic with user-supplied thresholds/checkpoints.
+        """
         n_steps = 5
-        CHECKPOINT_STEP_PCT = initial_checkpoint_pct / 100
-        THRESHOLDS_PCT = [initial_threshold_pct / 100 * (i+1) for i in range(n_steps)]
+        CHECKPOINT_STEP_PCT = (initial_checkpoint_pct / 100) if initial_checkpoint_pct is not None else 0.005
+        THRESHOLDS_PCT = [(initial_threshold_pct / 100 * (i+1)) if initial_threshold_pct is not None else (0.007 * (i+1)) for i in range(n_steps)]
 
         in_trade = False
         trades = []
@@ -281,32 +288,33 @@ class WalkForwardBacktester:
                             exit_reason = "Target"
                             break
 
-                    # 3. Check for threshold crossing, update checkpoint and stop if crossed
-                    while step_num < len(THRESHOLDS_PCT):
-                        threshold_price = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
-                        if (direction == "BUY" and high >= threshold_price) or (direction == "SELL" and low <= threshold_price):
-                            step_num += 1
-                            new_checkpoint = entry_price * (1 + CHECKPOINT_STEP_PCT * step_num) if direction == "BUY" else entry_price * (1 - CHECKPOINT_STEP_PCT * step_num)
-                            current_checkpoint = new_checkpoint
-                            checkpoint_history.append(new_checkpoint)
-                            stop_loss = new_checkpoint
-                            if step_num < len(THRESHOLDS_PCT):
-                                next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
-                        else:
-                            break
+                    if not disable_trailing:
+                        # 3. Check for threshold crossing, update checkpoint and stop if crossed
+                        while step_num < len(THRESHOLDS_PCT):
+                            threshold_price = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
+                            if (direction == "BUY" and high >= threshold_price) or (direction == "SELL" and low <= threshold_price):
+                                step_num += 1
+                                new_checkpoint = entry_price * (1 + CHECKPOINT_STEP_PCT * step_num) if direction == "BUY" else entry_price * (1 - CHECKPOINT_STEP_PCT * step_num)
+                                current_checkpoint = new_checkpoint
+                                checkpoint_history.append(new_checkpoint)
+                                stop_loss = new_checkpoint
+                                if step_num < len(THRESHOLDS_PCT):
+                                    next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
+                            else:
+                                break
 
-                    # 4. Pullback to checkpoint
-                    if step_num > 0:
-                        if direction == "BUY" and low <= current_checkpoint:
-                            exit_idx = j
-                            exit_price = current_checkpoint
-                            exit_reason = f"CheckpointLock (step {step_num})"
-                            break
-                        elif direction == "SELL" and high >= current_checkpoint:
-                            exit_idx = j
-                            exit_price = current_checkpoint
-                            exit_reason = f"CheckpointLock (step {step_num})"
-                            break
+                        # 4. Pullback to checkpoint
+                        if step_num > 0:
+                            if direction == "BUY" and low <= current_checkpoint:
+                                exit_idx = j
+                                exit_price = current_checkpoint
+                                exit_reason = f"CheckpointLock (step {step_num})"
+                                break
+                            elif direction == "SELL" and high >= current_checkpoint:
+                                exit_idx = j
+                                exit_price = current_checkpoint
+                                exit_reason = f"CheckpointLock (step {step_num})"
+                                break
 
                 if exit_idx is None:
                     exit_idx = len(df) - 1

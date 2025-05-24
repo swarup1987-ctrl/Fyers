@@ -1,5 +1,5 @@
 import sqlite3
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
 from project_paths import data_path
 
 try:
@@ -74,49 +74,40 @@ def resample_all():
 
 def resample(data, interval_minutes):
     """
+    Fast vectorized resampling using pandas.
     data: list of dicts (must have keys: timestamp, open, high, low, close, volume)
     interval_minutes: int (e.g., 15 or 60)
     Returns: list of dicts (same keys as input, timestamp is start of resampled interval)
     """
     if not data:
         return []
-    # Convert data to DataFrame for easier handling
     import pandas as pd
     df = pd.DataFrame(data)
     if df.empty:
         return []
-    # Explicitly cast 'timestamp' to int to avoid pandas FutureWarning
     df['timestamp'] = df['timestamp'].astype(int)
-    # Convert 'timestamp' to UTC datetime and then to IST
-    df['dt_ist'] = pd.to_datetime(df['timestamp'].astype(int), unit='s', utc=True).dt.tz_convert(IST)
-    # Group data by trading day (in IST)
-    out = []
-    for trade_date, day_df in df.groupby(df['dt_ist'].dt.date):
-        session_start = datetime.combine(trade_date, time(9, 15), IST)
-        session_end = datetime.combine(trade_date, time(15, 25), IST)
-        bucket_start = session_start
-        while bucket_start < session_end:
-            bucket_end = bucket_start + timedelta(minutes=interval_minutes)
-            if bucket_end > session_end + timedelta(minutes=1):  # ensure we don't overshoot last interval
-                break
-            mask = (day_df['dt_ist'] >= bucket_start) & (day_df['dt_ist'] < bucket_end)
-            bucket = day_df[mask]
-            if not bucket.empty:
-                # Aggregate the bucket
-                try:
-                    utc_bucket_start = bucket_start.astimezone(ZoneInfo("UTC"))
-                except Exception:
-                    import pytz
-                    utc_bucket_start = bucket_start.astimezone(pytz.UTC)
-                out.append({
-                    "id": int(bucket.iloc[0].get("id", 0)),
-                    "symbol": bucket.iloc[0]["symbol"],
-                    "timestamp": int(utc_bucket_start.timestamp()),
-                    "open": float(bucket.iloc[0]["open"]),
-                    "high": float(bucket["high"].max()),
-                    "low": float(bucket["low"].min()),
-                    "close": float(bucket.iloc[-1]["close"]),
-                    "volume": float(bucket["volume"].sum()),
-                })
-            bucket_start += timedelta(minutes=interval_minutes)
+    # Convert to IST
+    df['dt_ist'] = pd.to_datetime(df['timestamp'], unit='s', utc=True).dt.tz_convert(IST)
+    df = df.set_index('dt_ist')
+    rule = f'{interval_minutes}min'
+    agg = {
+        'open': 'first',
+        'high': 'max',
+        'low': 'min',
+        'close': 'last',
+        'volume': 'sum',
+        'id': 'first',
+        'symbol': 'first',
+        'timestamp': 'first',  # We'll overwrite this below
+    }
+    result = df.resample(rule, label='left', closed='left').agg(agg)
+    # Filter only session bars (09:15 to 15:25 IST)
+    session_start = time(9, 15)
+    session_end = time(15, 25)
+    result = result[(result.index.time >= session_start) & (result.index.time <= session_end)]
+    # Overwrite 'timestamp' with UTC timestamp of bucket start
+    result['timestamp'] = result.index.tz_convert('UTC').astype(int) // 10**9
+    # Drop buckets where open/close/high/low are NaN (no data in bucket)
+    result = result.dropna(subset=['open', 'close', 'high', 'low'])
+    out = result.reset_index(drop=True).to_dict(orient='records')
     return out

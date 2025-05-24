@@ -7,6 +7,7 @@ import hashlib
 import os
 import pickle
 import logging
+from datetime import datetime, time
 
 # --- Try to import Cython core, fallback if not available ---
 try:
@@ -14,6 +15,27 @@ try:
     CYTHON_AVAILABLE = True
 except ImportError:
     CYTHON_AVAILABLE = False
+
+# Timezone support for IST conversion
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from pytz import timezone as ZoneInfo
+IST = ZoneInfo("Asia/Kolkata")
+
+def is_entry_allowed(ts_utc):
+    """
+    Restrict trade entries after 15:15 IST.
+    ts_utc: timestamp (seconds since epoch, UTC)
+    Returns True only if bar's IST time is <= 15:15
+    """
+    dt_utc = datetime.utcfromtimestamp(float(ts_utc))
+    try:
+        dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+    except Exception:
+        import pytz
+        dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
+    return (dt_ist.hour < 15) or (dt_ist.hour == 15 and dt_ist.minute <= 15)
 
 class ParamCache:
     def __init__(self, cache_path="opt_cache.pkl"):
@@ -217,6 +239,7 @@ class Intraday15MinStrategy:
         """
         If disable_trailing is True, only use initial stop/target (no trailing).
         Otherwise, use the trailing logic with user-supplied thresholds/checkpoints.
+        Restricts trade entry after 15:15 IST and forces all open trades to exit at session end.
         """
         n_steps = 5
         # Set trailing params to None if disable_trailing, otherwise use self values (or fallback)
@@ -242,7 +265,8 @@ class Intraday15MinStrategy:
 
         for i, row in df.iterrows():
             sig = signals.iloc[i]
-            if not in_trade and sig["signal"] in ("BUY", "SELL"):
+            # Restrict entries after 15:15 IST
+            if not in_trade and sig["signal"] in ("BUY", "SELL") and is_entry_allowed(row["timestamp"]):
                 entry_idx = i
                 entry_price = sig["entry_price"]
                 stop_loss = sig["stop_loss"]
@@ -325,6 +349,7 @@ class Intraday15MinStrategy:
                                 exit_reason = f"CheckpointLock (step {step_num})"
                                 break
 
+                # Force exit at last bar if still open
                 if exit_idx is None:
                     exit_idx = len(df) - 1
                     exit_price = df.loc[exit_idx, "close"]

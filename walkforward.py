@@ -1,9 +1,30 @@
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 import logging
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
+
+# Timezone support for IST conversion
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    from pytz import timezone as ZoneInfo
+IST = ZoneInfo("Asia/Kolkata")
+
+def is_entry_allowed(ts_utc):
+    """
+    Restrict trade entries after 15:15 IST.
+    ts_utc: timestamp (seconds since epoch, UTC)
+    Returns True only if bar's IST time is <= 15:15
+    """
+    dt_utc = datetime.utcfromtimestamp(float(ts_utc))
+    try:
+        dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+    except Exception:
+        import pytz
+        dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
+    return (dt_ist.hour < 15) or (dt_ist.hour == 15 and dt_ist.minute <= 15)
 
 STRATEGY_MAP = {
     "deep.boll.vwap.rsi.macd": Intraday15MinStrategy,
@@ -220,6 +241,7 @@ class WalkForwardBacktester:
         """
         If disable_trailing is True, only use initial stop/target (no trailing).
         Otherwise, use the trailing logic with user-supplied thresholds/checkpoints.
+        Restricts trade entry after 15:15 IST and forces all open trades to exit at session end.
         """
         n_steps = 5
         CHECKPOINT_STEP_PCT = (initial_checkpoint_pct / 100) if initial_checkpoint_pct is not None else 0.005
@@ -237,7 +259,8 @@ class WalkForwardBacktester:
 
         for i, row in df.iterrows():
             sig = signals.iloc[i]
-            if not in_trade and sig["signal"] in ("BUY", "SELL"):
+            # Restrict entries after 15:15 IST
+            if not in_trade and sig["signal"] in ("BUY", "SELL") and is_entry_allowed(row["timestamp"]):
                 entry_idx = i
                 entry_price = sig["entry_price"]
                 stop_loss = sig["stop_loss"]
@@ -316,6 +339,7 @@ class WalkForwardBacktester:
                                 exit_reason = f"CheckpointLock (step {step_num})"
                                 break
 
+                # Force exit at last bar if still open
                 if exit_idx is None:
                     exit_idx = len(df) - 1
                     exit_price = df.loc[exit_idx, "close"]

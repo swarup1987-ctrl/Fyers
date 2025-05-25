@@ -232,6 +232,8 @@ class TPMStrategy:
     def backtest_on_signals(self, df, signals, disable_trailing=False):
         """
         Backtest logic with support for trailing and risk management.
+        Restrict trade exit at or before 15:15 IST (force EOD exit at 15:15 IST).
+        Only one trade at a time. If a new, opposing signal is generated, exit current trade and enter new one.
         """
         capital = 10000
         equity = [capital]
@@ -299,6 +301,7 @@ class TPMStrategy:
                     rowj = df.iloc[j]
                     ts = rowj["timestamp"]
                     barj_date, barj_time = ist_date_and_time(ts)
+                    sigj = signals.iloc[j]
                     # EOD/time exit
                     if barj_date != trade_date or barj_time > time(15, 15):
                         exit_idx = j - 1 if j > i else i
@@ -360,6 +363,13 @@ class TPMStrategy:
                             exit_reason = f"TrailStop"
                             i = j + 1
                             break
+                    # Opposing signal logic: exit immediately and allow outer loop to enter new trade
+                    if sigj['signal'] in ("BUY", "SELL") and sigj['signal'] != direction and is_entry_allowed(rowj["timestamp"]):
+                        exit_idx = j
+                        exit_price = rowj['open']  # Use open price of this bar for slippage realism
+                        exit_reason = "Opposite Signal"
+                        i = j  # Next outer loop: can immediately re-enter if signal present
+                        break
                 # If trade is still open at end, close at last bar
                 if exit_idx is None and in_trade:
                     exit_idx = len(df) - 1

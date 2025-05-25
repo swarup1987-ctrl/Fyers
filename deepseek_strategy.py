@@ -37,6 +37,15 @@ def is_entry_allowed(ts_utc):
         dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
     return (dt_ist.hour < 15) or (dt_ist.hour == 15 and dt_ist.minute <= 15)
 
+def ist_date_and_time(ts_utc):
+    dt_utc = datetime.utcfromtimestamp(float(ts_utc))
+    try:
+        dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+    except Exception:
+        import pytz
+        dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
+    return dt_ist.date(), dt_ist.time()
+
 class ParamCache:
     def __init__(self, cache_path="opt_cache.pkl"):
         self.cache_path = cache_path
@@ -237,22 +246,20 @@ class Intraday15MinStrategy:
 
     def backtest_on_signals(self, df, signals, disable_trailing=False):
         """
-        If disable_trailing is True, only use initial stop/target (no trailing).
-        Otherwise, use the trailing logic with user-supplied thresholds/checkpoints.
-        Restricts trade entry after 15:15 IST and forces all open trades to exit at session end.
+        Restrict trade entries after 15:15 IST.
+        Restrict trade exits at or before 15:15 IST (force EOD exit at 15:15 IST).
+        Only one trade at a time. If a new, opposing signal is generated, exit current trade and enter new one.
         """
         n_steps = 5
-        # Set trailing params to None if disable_trailing, otherwise use self values (or fallback)
         if disable_trailing or self.initial_threshold_pct is None or self.initial_checkpoint_pct is None:
             use_trailing = False
-            CHECKPOINT_STEP_PCT = 0.0  # doesn't matter
-            THRESHOLDS_PCT = [0.0] * n_steps  # doesn't matter
+            CHECKPOINT_STEP_PCT = 0.0
+            THRESHOLDS_PCT = [0.0] * n_steps
         else:
             use_trailing = True
             CHECKPOINT_STEP_PCT = self.initial_checkpoint_pct
             THRESHOLDS_PCT = [self.initial_threshold_pct * (i+1) for i in range(n_steps)]
 
-        in_trade = False
         trades = []
         capital = 10000
         equity = [capital]
@@ -263,129 +270,206 @@ class Intraday15MinStrategy:
         max_equity = capital
         max_drawdown = 0
 
-        for i, row in df.iterrows():
+        in_trade = False
+        entry_idx = None
+        entry_price = None
+        stop_loss = None
+        target1 = None
+        direction = None
+        checkpoint_history = []
+        step_num = 0
+        trade_entry_ist_date = None
+
+        i = 0
+        while i < len(df):
             sig = signals.iloc[i]
-            # Restrict entries after 15:15 IST
+            row = df.iloc[i]
+            bar_ist_date, bar_ist_time = ist_date_and_time(row["timestamp"])
+
+            # --- If NOT in a trade, check for new signal ---
             if not in_trade and sig["signal"] in ("BUY", "SELL") and is_entry_allowed(row["timestamp"]):
+                # Open new trade
                 entry_idx = i
                 entry_price = sig["entry_price"]
                 stop_loss = sig["stop_loss"]
                 target1 = sig["target1"]
                 direction = sig["signal"]
                 in_trade = True
-
-                # --- Trailing/Checkpoint state ---
+                trade_entry_ist_date = bar_ist_date
+                checkpoint_history = [entry_price]
                 step_num = 0
                 next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
                 current_checkpoint = entry_price
-                checkpoint_history = [entry_price]
+                i += 1
+                continue
 
+            # --- If in a trade, simulate trade bar by bar ---
+            if in_trade:
                 exit_idx = None
                 exit_price = None
                 exit_reason = None
 
-                for j in range(i + 1, len(df)):
-                    high = df.loc[j, "high"]
-                    low = df.loc[j, "low"]
-                    price = df.loc[j, "close"]
+                # Check for stop/target/threshold/15:15/EOD/opposite signal
+                for j in range(i, len(df)):
+                    rowj = df.iloc[j]
+                    high = rowj["high"]
+                    low = rowj["low"]
+                    price = rowj["close"]
+                    ts = rowj["timestamp"]
+                    ist_date, ist_time = ist_date_and_time(ts)
+                    sigj = signals.iloc[j]
 
-                    # 1. Check for stop loss
+                    # 1. EOD/15:15 IST restriction: force exit at 15:15 IST or if day changes
+                    if ist_date != trade_entry_ist_date or ist_time > time(15, 15):
+                        # Exit at previous bar (last bar <= 15:15 IST)
+                        exit_idx = j - 1 if j > i else i
+                        exit_price = df.loc[exit_idx, "close"]
+                        exit_reason = "EOD"
+                        i = exit_idx + 1
+                        break
+
+                    # 2. Stop loss
                     if direction == "BUY":
                         if low <= stop_loss:
                             exit_idx = j
                             exit_price = stop_loss
                             exit_reason = "Stop"
+                            i = j + 1
                             break
                     else:
                         if high >= stop_loss:
                             exit_idx = j
                             exit_price = stop_loss
                             exit_reason = "Stop"
+                            i = j + 1
                             break
 
-                    # 2. Check for initial fixed target
+                    # 3. Initial target
                     if direction == "BUY":
                         if high >= target1:
                             exit_idx = j
                             exit_price = target1
                             exit_reason = "Target"
+                            i = j + 1
                             break
                     else:
                         if low <= target1:
                             exit_idx = j
                             exit_price = target1
                             exit_reason = "Target"
+                            i = j + 1
                             break
 
+                    # 4. Trailing logic
                     if use_trailing:
-                        # 3. Check for threshold crossing, update checkpoint and stop if crossed
-                        threshold_crossed = False
                         while step_num < len(THRESHOLDS_PCT):
                             threshold_price = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
                             if (direction == "BUY" and high >= threshold_price) or (direction == "SELL" and low <= threshold_price):
-                                # Move checkpoint and stop
                                 step_num += 1
                                 new_checkpoint = entry_price * (1 + CHECKPOINT_STEP_PCT * step_num) if direction == "BUY" else entry_price * (1 - CHECKPOINT_STEP_PCT * step_num)
                                 current_checkpoint = new_checkpoint
                                 checkpoint_history.append(new_checkpoint)
-                                # Move stop loss as well
                                 stop_loss = new_checkpoint
-                                # Advance next threshold if more remain
                                 if step_num < len(THRESHOLDS_PCT):
                                     next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
-                                threshold_crossed = True
                             else:
                                 break
-                        # 4. If price falls back to checkpoint after threshold crossing, exit
                         if step_num > 0:
                             if direction == "BUY" and low <= current_checkpoint:
                                 exit_idx = j
                                 exit_price = current_checkpoint
                                 exit_reason = f"CheckpointLock (step {step_num})"
+                                i = j + 1
                                 break
                             elif direction == "SELL" and high >= current_checkpoint:
                                 exit_idx = j
                                 exit_price = current_checkpoint
                                 exit_reason = f"CheckpointLock (step {step_num})"
+                                i = j + 1
                                 break
 
-                # Force exit at last bar if still open
-                if exit_idx is None:
+                    # 5. Opposite signal: exit immediately and enter new trade
+                    if sigj["signal"] in ("BUY", "SELL") and sigj["signal"] != direction and is_entry_allowed(ts):
+                        exit_idx = j
+                        exit_price = rowj["open"]  # Use open price of this bar for slippage realism
+                        exit_reason = "Opposite Signal"
+                        # Will enter new trade in main loop at i = j
+                        i = j
+                        break
+
+                    # else continue loop
+
+                # If we exited by break, record the trade
+                if exit_idx is not None:
+                    size = 1
+                    pl = (exit_price - entry_price) * size if direction == "BUY" else (entry_price - exit_price) * size
+                    capital += pl
+                    trades.append({
+                        "entry_idx": entry_idx,
+                        "exit_idx": exit_idx,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "direction": direction,
+                        "exit_reason": exit_reason,
+                        "pl": pl,
+                        "capital": capital,
+                        "entry_time": df.loc[entry_idx, "timestamp"],
+                        "exit_time": df.loc[exit_idx, "timestamp"],
+                        "checkpoint_history": checkpoint_history
+                    })
+                    equity.append(capital)
+                    if pl > 0:
+                        win += 1
+                        gross_profit += pl
+                    else:
+                        loss += 1
+                        gross_loss -= pl
+                    if capital > max_equity:
+                        max_equity = capital
+                    dd = (max_equity - capital)
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+                    in_trade = False
+                    # If exited by opposite signal, the main loop will check and start new trade here
+                    continue
+
+                # If we reached the end of the data, close trade at last bar
+                if in_trade:
                     exit_idx = len(df) - 1
                     exit_price = df.loc[exit_idx, "close"]
                     exit_reason = "EOD"
-                size = 1
-                if direction == "BUY":
-                    pl = (exit_price - entry_price) * size
-                else:
-                    pl = (entry_price - exit_price) * size
-                capital += pl
-                trades.append({
-                    "entry_idx": entry_idx,
-                    "exit_idx": exit_idx,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "direction": direction,
-                    "exit_reason": exit_reason,
-                    "pl": pl,
-                    "capital": capital,
-                    "entry_time": df.loc[entry_idx, "timestamp"],
-                    "exit_time": df.loc[exit_idx, "timestamp"],
-                    "checkpoint_history": checkpoint_history
-                })
-                equity.append(capital)
-                if pl > 0:
-                    win += 1
-                    gross_profit += pl
-                else:
-                    loss += 1
-                    gross_loss -= pl
-                if capital > max_equity:
-                    max_equity = capital
-                dd = (max_equity - capital)
-                if dd > max_drawdown:
-                    max_drawdown = dd
-                in_trade = False
+                    size = 1
+                    pl = (exit_price - entry_price) * size if direction == "BUY" else (entry_price - exit_price) * size
+                    capital += pl
+                    trades.append({
+                        "entry_idx": entry_idx,
+                        "exit_idx": exit_idx,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "direction": direction,
+                        "exit_reason": exit_reason,
+                        "pl": pl,
+                        "capital": capital,
+                        "entry_time": df.loc[entry_idx, "timestamp"],
+                        "exit_time": df.loc[exit_idx, "timestamp"],
+                        "checkpoint_history": checkpoint_history
+                    })
+                    equity.append(capital)
+                    if pl > 0:
+                        win += 1
+                        gross_profit += pl
+                    else:
+                        loss += 1
+                        gross_loss -= pl
+                    if capital > max_equity:
+                        max_equity = capital
+                    dd = (max_equity - capital)
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+                    in_trade = False
+                    break
+            i += 1
+
         sharpe = self.compute_sharpe(equity)
         return {
             "sharpe": sharpe,

@@ -13,11 +13,6 @@ except ImportError:
 IST = ZoneInfo("Asia/Kolkata")
 
 def is_entry_allowed(ts_utc):
-    """
-    Restrict trade entries after 15:15 IST.
-    ts_utc: timestamp (seconds since epoch, UTC)
-    Returns True only if bar's IST time is <= 15:15
-    """
     dt_utc = datetime.utcfromtimestamp(float(ts_utc))
     try:
         dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
@@ -25,6 +20,15 @@ def is_entry_allowed(ts_utc):
         import pytz
         dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
     return (dt_ist.hour < 15) or (dt_ist.hour == 15 and dt_ist.minute <= 15)
+
+def ist_date_and_time(ts_utc):
+    dt_utc = datetime.utcfromtimestamp(float(ts_utc))
+    try:
+        dt_ist = dt_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(IST)
+    except Exception:
+        import pytz
+        dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
+    return dt_ist.date(), dt_ist.time()
 
 STRATEGY_MAP = {
     "deep.boll.vwap.rsi.macd": Intraday15MinStrategy,
@@ -47,9 +51,9 @@ class WalkForwardBacktester:
         n_trials=50,
         n_random_trials=20,
         log_file="walkforward_windows.log",
-        initial_threshold_pct=None,    # Now can be None
-        initial_checkpoint_pct=None,   # Now can be None
-        disable_trailing=False         # New flag: true disables trailing logic
+        initial_threshold_pct=None,
+        initial_checkpoint_pct=None,
+        disable_trailing=False
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -73,7 +77,6 @@ class WalkForwardBacktester:
         if self.strategy_cls is None:
             raise ValueError(f"Strategy '{strategy_key}' not implemented.")
 
-        # Pass user-supplied thresholds/checkpoint to strategy instance
         self.strategy = self.strategy_cls(
             initial_threshold_pct=self.initial_threshold_pct,
             initial_checkpoint_pct=self.initial_checkpoint_pct
@@ -136,7 +139,6 @@ class WalkForwardBacktester:
         prev_best_params = None
 
         for idx, (train_df, test_df, train_start, test_start) in enumerate(windows):
-            # Re-instantiate the strategy for each window with user-supplied params
             strategy = self.strategy_cls(
                 initial_threshold_pct=self.initial_threshold_pct,
                 initial_checkpoint_pct=self.initial_checkpoint_pct
@@ -166,7 +168,7 @@ class WalkForwardBacktester:
             test_df = test_df.reset_index(drop=True)
             signals = signals.reset_index(drop=True)
 
-            # Updated: Pass disable_trailing flag and raw (possibly None) thresholds
+            # Use the updated simulation logic for one-trade/forced-EOD/flip-on-signal
             trades, equity, win, loss, gross_profit, gross_loss, max_drawdown = self.simulate_trades(
                 test_df, signals, capital,
                 initial_threshold_pct=self.initial_threshold_pct,
@@ -194,7 +196,6 @@ class WalkForwardBacktester:
             }
             results_per_window.append(window_result)
 
-            # Incremental print/log after each window
             summary_msg = (f"Window {idx+1}: {train_start.date()} - {test_start.date()} | "
                            f"Trades: {len(trades)}, P/L: {gross_profit-gross_loss:.2f}, "
                            f"Best Params: {strategy.params_to_str(best_params) if best_params else 'N/A'}")
@@ -238,16 +239,10 @@ class WalkForwardBacktester:
         }
 
     def simulate_trades(self, df, signals, capital, initial_threshold_pct=0.7, initial_checkpoint_pct=0.5, disable_trailing=False):
-        """
-        If disable_trailing is True, only use initial stop/target (no trailing).
-        Otherwise, use the trailing logic with user-supplied thresholds/checkpoints.
-        Restricts trade entry after 15:15 IST and forces all open trades to exit at session end.
-        """
         n_steps = 5
         CHECKPOINT_STEP_PCT = (initial_checkpoint_pct / 100) if initial_checkpoint_pct is not None else 0.005
         THRESHOLDS_PCT = [(initial_threshold_pct / 100 * (i+1)) if initial_threshold_pct is not None else (0.007 * (i+1)) for i in range(n_steps)]
 
-        in_trade = False
         trades = []
         equity = [capital]
         win = 0
@@ -257,9 +252,22 @@ class WalkForwardBacktester:
         max_equity = capital
         max_drawdown = 0
 
-        for i, row in df.iterrows():
+        in_trade = False
+        entry_idx = None
+        entry_price = None
+        stop_loss = None
+        target1 = None
+        direction = None
+        checkpoint_history = []
+        step_num = 0
+        trade_entry_ist_date = None
+
+        i = 0
+        while i < len(df):
             sig = signals.iloc[i]
-            # Restrict entries after 15:15 IST
+            row = df.iloc[i]
+            bar_ist_date, bar_ist_time = ist_date_and_time(row["timestamp"])
+
             if not in_trade and sig["signal"] in ("BUY", "SELL") and is_entry_allowed(row["timestamp"]):
                 entry_idx = i
                 entry_price = sig["entry_price"]
@@ -267,52 +275,66 @@ class WalkForwardBacktester:
                 target1 = sig["target1"]
                 direction = sig["signal"]
                 in_trade = True
-
-                # --- Trailing/Checkpoint state ---
+                trade_entry_ist_date = bar_ist_date
+                checkpoint_history = [entry_price]
                 step_num = 0
                 next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
                 current_checkpoint = entry_price
-                checkpoint_history = [entry_price]
+                i += 1
+                continue
 
+            if in_trade:
                 exit_idx = None
                 exit_price = None
                 exit_reason = None
 
-                for j in range(i + 1, len(df)):
-                    high = df.loc[j, "high"]
-                    low = df.loc[j, "low"]
-                    price = df.loc[j, "close"]
+                for j in range(i, len(df)):
+                    rowj = df.iloc[j]
+                    high = rowj["high"]
+                    low = rowj["low"]
+                    price = rowj["close"]
+                    ts = rowj["timestamp"]
+                    ist_date, ist_time = ist_date_and_time(ts)
+                    sigj = signals.iloc[j]
 
-                    # 1. Stop loss check
+                    if ist_date != trade_entry_ist_date or ist_time > time(15, 15):
+                        exit_idx = j - 1 if j > i else i
+                        exit_price = df.loc[exit_idx, "close"]
+                        exit_reason = "EOD"
+                        i = exit_idx + 1
+                        break
+
                     if direction == "BUY":
                         if low <= stop_loss:
                             exit_idx = j
                             exit_price = stop_loss
                             exit_reason = "Stop"
+                            i = j + 1
                             break
                     else:
                         if high >= stop_loss:
                             exit_idx = j
                             exit_price = stop_loss
                             exit_reason = "Stop"
+                            i = j + 1
                             break
 
-                    # 2. Initial target check
                     if direction == "BUY":
                         if high >= target1:
                             exit_idx = j
                             exit_price = target1
                             exit_reason = "Target"
+                            i = j + 1
                             break
                     else:
                         if low <= target1:
                             exit_idx = j
                             exit_price = target1
                             exit_reason = "Target"
+                            i = j + 1
                             break
 
                     if not disable_trailing:
-                        # 3. Check for threshold crossing, update checkpoint and stop if crossed
                         while step_num < len(THRESHOLDS_PCT):
                             threshold_price = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
                             if (direction == "BUY" and high >= threshold_price) or (direction == "SELL" and low <= threshold_price):
@@ -325,57 +347,95 @@ class WalkForwardBacktester:
                                     next_threshold = entry_price * (1 + THRESHOLDS_PCT[step_num]) if direction == "BUY" else entry_price * (1 - THRESHOLDS_PCT[step_num])
                             else:
                                 break
-
-                        # 4. Pullback to checkpoint
                         if step_num > 0:
                             if direction == "BUY" and low <= current_checkpoint:
                                 exit_idx = j
                                 exit_price = current_checkpoint
                                 exit_reason = f"CheckpointLock (step {step_num})"
+                                i = j + 1
                                 break
                             elif direction == "SELL" and high >= current_checkpoint:
                                 exit_idx = j
                                 exit_price = current_checkpoint
                                 exit_reason = f"CheckpointLock (step {step_num})"
+                                i = j + 1
                                 break
 
-                # Force exit at last bar if still open
-                if exit_idx is None:
+                    if sigj["signal"] in ("BUY", "SELL") and sigj["signal"] != direction and is_entry_allowed(ts):
+                        exit_idx = j
+                        exit_price = rowj["open"]
+                        exit_reason = "Opposite Signal"
+                        i = j
+                        break
+
+                if exit_idx is not None:
+                    size = 1
+                    pl = (exit_price - entry_price) * size if direction == "BUY" else (entry_price - exit_price) * size
+                    capital += pl
+                    trades.append({
+                        "entry_idx": entry_idx,
+                        "exit_idx": exit_idx,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "direction": direction,
+                        "exit_reason": exit_reason,
+                        "pl": pl,
+                        "capital": capital,
+                        "entry_time": df.loc[entry_idx, "timestamp"],
+                        "exit_time": df.loc[exit_idx, "timestamp"],
+                        "checkpoint_history": checkpoint_history
+                    })
+                    equity.append(capital)
+                    if pl > 0:
+                        win += 1
+                        gross_profit += pl
+                    else:
+                        loss += 1
+                        gross_loss -= pl
+                    if capital > max_equity:
+                        max_equity = capital
+                    dd = (max_equity - capital)
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+                    in_trade = False
+                    continue
+
+                if in_trade:
                     exit_idx = len(df) - 1
                     exit_price = df.loc[exit_idx, "close"]
                     exit_reason = "EOD"
-                size = 1
-                if direction == "BUY":
-                    pl = (exit_price - entry_price) * size
-                else:
-                    pl = (entry_price - exit_price) * size
-                capital += pl
-                trades.append({
-                    "entry_idx": entry_idx,
-                    "exit_idx": exit_idx,
-                    "entry_price": entry_price,
-                    "exit_price": exit_price,
-                    "direction": direction,
-                    "exit_reason": exit_reason,
-                    "pl": pl,
-                    "capital": capital,
-                    "entry_time": df.loc[entry_idx, "timestamp"],
-                    "exit_time": df.loc[exit_idx, "timestamp"],
-                    "checkpoint_history": checkpoint_history
-                })
-                equity.append(capital)
-                if pl > 0:
-                    win += 1
-                    gross_profit += pl
-                else:
-                    loss += 1
-                    gross_loss -= pl
-                if capital > max_equity:
-                    max_equity = capital
-                dd = (max_equity - capital)
-                if dd > max_drawdown:
-                    max_drawdown = dd
-                in_trade = False
+                    size = 1
+                    pl = (exit_price - entry_price) * size if direction == "BUY" else (entry_price - exit_price) * size
+                    capital += pl
+                    trades.append({
+                        "entry_idx": entry_idx,
+                        "exit_idx": exit_idx,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "direction": direction,
+                        "exit_reason": exit_reason,
+                        "pl": pl,
+                        "capital": capital,
+                        "entry_time": df.loc[entry_idx, "timestamp"],
+                        "exit_time": df.loc[exit_idx, "timestamp"],
+                        "checkpoint_history": checkpoint_history
+                    })
+                    equity.append(capital)
+                    if pl > 0:
+                        win += 1
+                        gross_profit += pl
+                    else:
+                        loss += 1
+                        gross_loss -= pl
+                    if capital > max_equity:
+                        max_equity = capital
+                    dd = (max_equity - capital)
+                    if dd > max_drawdown:
+                        max_drawdown = dd
+                    in_trade = False
+                    break
+            i += 1
+
         return trades, equity, win, loss, gross_profit, gross_loss, max_drawdown
 
     @staticmethod

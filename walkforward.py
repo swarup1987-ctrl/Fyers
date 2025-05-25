@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, time
 import logging
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
+from tpm import TPMStrategy  # <-- Add your new strategy module here
 
 # Timezone support for IST conversion
 try:
@@ -32,6 +33,7 @@ def ist_date_and_time(ts_utc):
 
 STRATEGY_MAP = {
     "deep.boll.vwap.rsi.macd": Intraday15MinStrategy,
+    "tpm.ema.rsi.vol": TPMStrategy,  # <-- Add mapping for your new strategy
 }
 
 class WalkForwardBacktester:
@@ -53,7 +55,12 @@ class WalkForwardBacktester:
         log_file="walkforward_windows.log",
         initial_threshold_pct=None,
         initial_checkpoint_pct=None,
-        disable_trailing=False
+        disable_trailing=False,
+        # For TPMStrategy specific params (optional, passthrough)
+        profit_target_pct=None,
+        stop_loss_pct=None,
+        trailing_target_pct=None,
+        trailing_stop_pct=None,
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -73,14 +80,30 @@ class WalkForwardBacktester:
         self.initial_checkpoint_pct = initial_checkpoint_pct
         self.disable_trailing = disable_trailing
 
+        # For TPMStrategy-specific user params
+        self.profit_target_pct = profit_target_pct
+        self.stop_loss_pct = stop_loss_pct
+        self.trailing_target_pct = trailing_target_pct
+        self.trailing_stop_pct = trailing_stop_pct
+
         self.strategy_cls = STRATEGY_MAP.get(strategy_key)
         if self.strategy_cls is None:
             raise ValueError(f"Strategy '{strategy_key}' not implemented.")
 
-        self.strategy = self.strategy_cls(
-            initial_threshold_pct=self.initial_threshold_pct,
-            initial_checkpoint_pct=self.initial_checkpoint_pct
-        )
+        # Instantiate the strategy with correct params, depending on strategy
+        if self.strategy_key == "tpm.ema.rsi.vol":
+            self.strategy = self.strategy_cls(
+                profit_target_pct=profit_target_pct or 0.9,
+                stop_loss_pct=stop_loss_pct or 0.45,
+                trailing_target_pct=trailing_target_pct,
+                trailing_stop_pct=trailing_stop_pct,
+                use_trailing=not disable_trailing
+            )
+        else:
+            self.strategy = self.strategy_cls(
+                initial_threshold_pct=self.initial_threshold_pct,
+                initial_checkpoint_pct=self.initial_checkpoint_pct
+            )
 
         self._logger = logging.getLogger("WalkForwardLogger")
         file_handler = logging.FileHandler(self.log_file)
@@ -139,10 +162,20 @@ class WalkForwardBacktester:
         prev_best_params = None
 
         for idx, (train_df, test_df, train_start, test_start) in enumerate(windows):
-            strategy = self.strategy_cls(
-                initial_threshold_pct=self.initial_threshold_pct,
-                initial_checkpoint_pct=self.initial_checkpoint_pct
-            )
+            # Instantiate correct strategy with current params
+            if self.strategy_key == "tpm.ema.rsi.vol":
+                strategy = self.strategy_cls(
+                    profit_target_pct=self.profit_target_pct or 0.9,
+                    stop_loss_pct=self.stop_loss_pct or 0.45,
+                    trailing_target_pct=self.trailing_target_pct,
+                    trailing_stop_pct=self.trailing_stop_pct,
+                    use_trailing=not self.disable_trailing
+                )
+            else:
+                strategy = self.strategy_cls(
+                    initial_threshold_pct=self.initial_threshold_pct,
+                    initial_checkpoint_pct=self.initial_checkpoint_pct
+                )
             best_params = None
             best_stats = None
             if self.param_optimization and hasattr(strategy, "fit"):
@@ -169,12 +202,31 @@ class WalkForwardBacktester:
             signals = signals.reset_index(drop=True)
 
             # Use the updated simulation logic for one-trade/forced-EOD/flip-on-signal
-            trades, equity, win, loss, gross_profit, gross_loss, max_drawdown = self.simulate_trades(
-                test_df, signals, capital,
-                initial_threshold_pct=self.initial_threshold_pct,
-                initial_checkpoint_pct=self.initial_checkpoint_pct,
-                disable_trailing=self.disable_trailing
-            )
+            if hasattr(strategy, "backtest_on_signals"):
+                stats = strategy.backtest_on_signals(
+                    test_df,
+                    signals,
+                    disable_trailing=self.disable_trailing
+                )
+                trades = stats["trades"]
+                equity = np.cumsum([t["pl"] for t in trades]).tolist()
+                if equity:
+                    equity = [self.capital] + [self.capital + x for x in equity]
+                else:
+                    equity = [self.capital]
+                win = stats.get("win", 0)
+                loss = stats.get("loss", 0)
+                gross_profit = stats.get("gross_profit", 0)
+                gross_loss = stats.get("gross_loss", 0)
+                max_drawdown = stats.get("max_drawdown", 0) if "max_drawdown" in stats else 0
+            else:
+                # Fallback to simulate_trades for legacy strategies
+                trades, equity, win, loss, gross_profit, gross_loss, max_drawdown = self.simulate_trades(
+                    test_df, signals, capital,
+                    initial_threshold_pct=self.initial_threshold_pct,
+                    initial_checkpoint_pct=self.initial_checkpoint_pct,
+                    disable_trailing=self.disable_trailing
+                )
             all_trades.extend(trades)
             equity_curve.extend(equity)
             if len(equity) > 0:

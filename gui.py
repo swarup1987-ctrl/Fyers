@@ -17,6 +17,7 @@ from project_paths import data_path
 
 # --- Strategy imports ---
 from deepseek_strategy import Intraday15MinStrategy
+from tpm import TPMStrategy  # <-- Import the new strategy
 from walkforward import WalkForwardBacktester
 
 import numbers  # for robust timestamp conversion
@@ -337,7 +338,10 @@ def open_backtest_window(parent):
     strategy_dropdown = ttk.Combobox(
         strategy_frame,
         textvariable=strategy_var,
-        values=["deep.boll.vwap.rsi.macd"],
+        values=[
+            "deep.boll.vwap.rsi.macd",
+            "tpm.ema.rsi.vol"
+        ],  # <-- Add new strategy here
         state="readonly",
         width=30
     )
@@ -401,6 +405,12 @@ def open_backtest_window(parent):
         if selected == "deep.boll.vwap.rsi.macd":
             active_strategy_instance = Intraday15MinStrategy()
             result_label.config(text="Strategy 'deep.boll.vwap.rsi.macd' loaded and ready.", fg="green")
+        elif selected == "tpm.ema.rsi.vol":
+            active_strategy_instance = TPMStrategy()
+            result_label.config(text="Strategy 'tpm.ema.rsi.vol' loaded and ready.", fg="green")
+        else:
+            active_strategy_instance = None
+            result_label.config(text="No strategy loaded", fg="red")
 
     strategy_dropdown.bind("<<ComboboxSelected>>", on_strategy_change)
     on_strategy_change()
@@ -521,6 +531,15 @@ def open_backtest_window(parent):
                     if window_stat and isinstance(window_stat, dict):
                         msg += f": trades={window_stat.get('num_trades','?')}, profit={window_stat.get('gross_profit', '?'):.2f}"
                     progress_q.put((val, msg))
+                # Pass trailing params only if TPM strategy is selected
+                extra_kwargs = {}
+                if strategy_key == "tpm.ema.rsi.vol":
+                    extra_kwargs.update({
+                        "profit_target_pct": threshold_pct if use_trailing else None,
+                        "stop_loss_pct": checkpoint_pct if use_trailing else None,
+                        "trailing_target_pct": threshold_pct if use_trailing else None,
+                        "trailing_stop_pct": checkpoint_pct if use_trailing else None,
+                    })
                 backtester = WalkForwardBacktester(
                     strategy_key=strategy_key,
                     interval=interval,
@@ -534,9 +553,10 @@ def open_backtest_window(parent):
                     param_sampler=sampler,
                     n_trials=n_trials,
                     n_random_trials=n_random_trials,
-                    initial_threshold_pct=threshold_pct,
-                    initial_checkpoint_pct=checkpoint_pct,
-                    disable_trailing=not use_trailing  # <--- Pass flag to backtester/strategy
+                    initial_threshold_pct=threshold_pct if strategy_key == "deep.boll.vwap.rsi.macd" else None,
+                    initial_checkpoint_pct=checkpoint_pct if strategy_key == "deep.boll.vwap.rsi.macd" else None,
+                    disable_trailing=not use_trailing,
+                    **extra_kwargs
                 )
                 results = backtester.run_backtest()
                 stats = results["stats"]

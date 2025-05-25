@@ -1,6 +1,12 @@
 import numpy as np
 import pandas as pd
+import itertools
 import json
+import random
+import hashlib
+import os
+import pickle
+import logging
 from datetime import datetime, time
 
 # Timezone support for IST conversion
@@ -27,6 +33,56 @@ def ist_date_and_time(ts_utc):
         import pytz
         dt_ist = pytz.UTC.localize(dt_utc).astimezone(IST)
     return dt_ist.date(), dt_ist.time()
+
+class ParamCache:
+    def __init__(self, cache_path="tpm_opt_cache.pkl"):
+        self.cache_path = cache_path
+        self._cache = None
+        self._dirty = False
+
+    def load(self):
+        if self._cache is not None:
+            return
+        if os.path.exists(self.cache_path):
+            try:
+                with open(self.cache_path, "rb") as f:
+                    self._cache = pickle.load(f)
+            except Exception:
+                self._cache = {}
+        else:
+            self._cache = {}
+
+    def save(self):
+        if not self._dirty:
+            return
+        try:
+            with open(self.cache_path, "wb") as f:
+                pickle.dump(self._cache, f)
+            self._dirty = False
+        except Exception as e:
+            print(f"ParamCache save error: {e}")
+
+    def get(self, key):
+        self.load()
+        return self._cache.get(key)
+
+    def set(self, key, value):
+        self.load()
+        self._cache[key] = value
+        self._dirty = True
+
+    def __del__(self):
+        self.save()
+
+def hash_train_df(train_df):
+    if len(train_df) < 2:
+        return None
+    start = train_df.iloc[0].get("timestamp", None)
+    end = train_df.iloc[-1].get("timestamp", None)
+    nrows = len(train_df)
+    cols = tuple(train_df.columns)
+    h = hashlib.md5(str((start, end, nrows, cols)).encode("utf-8")).hexdigest()
+    return h
 
 class TPMStrategy:
     def __init__(
@@ -364,4 +420,189 @@ class TPMStrategy:
         sharpe = np.mean(rets) / np.std(rets) * np.sqrt(252)
         return sharpe
 
-    # Optionally, implement fit() for parameter optimization as in other strategies.
+    @staticmethod
+    def _evaluate_param_combo(params_dict, train_df_dict, metric="sharpe"):
+        train_df = pd.DataFrame(train_df_dict)
+        strat = TPMStrategy(**params_dict)
+        signals = strat.generate_signals(train_df)
+        stats = strat.backtest_on_signals(train_df, signals)
+        score = stats.get(metric, 0)
+        if np.isnan(score):
+            score = -np.inf
+        return (params_dict, score, stats)
+
+    def fit(
+        self,
+        train_df,
+        param_grid=None,
+        metric='sharpe',
+        sampler="bayesian",
+        n_trials=50,
+        n_random_trials=20,
+        sharpe_accept=0.8,
+        n_trades_accept=5,
+        cache=None,
+        cache_path="tpm_opt_cache.pkl",
+        prev_best_params=None,
+        print_callback=None,
+        log_file="tpm_optuna_trials.log"
+    ):
+        """
+        print_callback: function(trial_number, params, score) for incremental trial logging
+        log_file: Optional file path to log all trials
+        """
+        import concurrent.futures
+
+        logger = logging.getLogger("TPMOptunaTrialLogger")
+        file_handler = logging.FileHandler(log_file)
+        formatter = logging.Formatter('%(asctime)s %(message)s')
+        file_handler.setFormatter(formatter)
+        if not logger.hasHandlers():
+            logger.addHandler(file_handler)
+        logger.setLevel(logging.INFO)
+
+        if param_grid is None:
+            param_grid = {
+                "ema_period": [10, 15, 20, 25],
+                "rsi_period": [7, 9, 12],
+                "vma_period": [30, 40, 50, 60],
+                "profit_target_pct": [0.7, 0.8, 0.9, 1.0, 1.1],  # Percent
+                "stop_loss_pct": [0.35, 0.4, 0.45, 0.5, 0.55],    # Percent
+                "use_trailing": [False, True],
+                "trailing_target_pct": [None, 0.5, 0.7, 0.9],     # Percent
+                "trailing_stop_pct": [None, 0.25, 0.35, 0.45],    # Percent
+            }
+
+        # Remove trailing params if use_trailing is False for a combo
+        param_names = list(param_grid.keys())
+        param_combinations = list(itertools.product(*[param_grid[k] for k in param_names]))
+        param_dicts = []
+        for vals in param_combinations:
+            params = dict(zip(param_names, vals))
+            if not params["use_trailing"]:
+                params["trailing_target_pct"] = None
+                params["trailing_stop_pct"] = None
+            param_dicts.append(params)
+        train_df_dict = train_df.to_dict(orient='list')
+
+        # Caching
+        if cache is None:
+            cache = ParamCache(cache_path)
+        train_hash = hash_train_df(train_df)
+        cached = cache.get(train_hash)
+        if cached:
+            cached_params, cached_score, cached_stats = cached
+            # Try previous best params on current train set
+            self.set_params(**cached_params)
+            signals = self.generate_signals(train_df)
+            stats = self.backtest_on_signals(train_df, signals)
+            if (
+                stats.get("sharpe", 0) >= sharpe_accept
+                and stats.get("num_trades", 0) >= n_trades_accept
+            ):
+                cache.set(train_hash, (cached_params, stats.get("sharpe", 0), stats))
+                cache.save()
+                return cached_params, stats
+            # Else, will optimize and update cache
+
+        # If previous best params passed (from last window), try them and enqueue
+        best_trial_params = None
+        if prev_best_params is not None:
+            self.set_params(**prev_best_params)
+            signals = self.generate_signals(train_df)
+            stats = self.backtest_on_signals(train_df, signals)
+            if (
+                stats.get("sharpe", 0) >= sharpe_accept
+                and stats.get("num_trades", 0) >= n_trades_accept
+            ):
+                cache.set(train_hash, (prev_best_params, stats.get("sharpe", 0), stats))
+                cache.save()
+                return prev_best_params, stats
+            best_trial_params = prev_best_params
+
+        best_score = -np.inf
+        best_params = self.get_params()
+        best_stats = None
+
+        if sampler == "grid":
+            for idx, params in enumerate(param_dicts):
+                _, score, stats = TPMStrategy._evaluate_param_combo(params, train_df_dict, metric)
+                msg = f"[TPM Grid Trial {idx+1}] Params={params} | {metric}: {score:.5f}"
+                print(msg)
+                logger.info(msg)
+                if print_callback:
+                    print_callback(idx+1, params, score)
+                if score > best_score:
+                    best_score = score
+                    best_params = params.copy()
+                    best_stats = stats.copy() if stats else None
+
+        elif sampler == "random":
+            random_param_dicts = random.sample(param_dicts, min(n_trials, len(param_dicts)))
+            for idx, params in enumerate(random_param_dicts):
+                _, score, stats = TPMStrategy._evaluate_param_combo(params, train_df_dict, metric)
+                msg = f"[TPM Random Trial {idx+1}] Params={params} | {metric}: {score:.5f}"
+                print(msg)
+                logger.info(msg)
+                if print_callback:
+                    print_callback(idx+1, params, score)
+                if score > best_score:
+                    best_score = score
+                    best_params = params.copy()
+                    best_stats = stats.copy() if stats else None
+
+        elif sampler == "bayesian":
+            import optuna
+
+            def objective(trial):
+                params = {
+                    "ema_period": trial.suggest_categorical("ema_period", param_grid["ema_period"]),
+                    "rsi_period": trial.suggest_categorical("rsi_period", param_grid["rsi_period"]),
+                    "vma_period": trial.suggest_categorical("vma_period", param_grid["vma_period"]),
+                    "profit_target_pct": trial.suggest_categorical("profit_target_pct", param_grid["profit_target_pct"]),
+                    "stop_loss_pct": trial.suggest_categorical("stop_loss_pct", param_grid["stop_loss_pct"]),
+                    "use_trailing": trial.suggest_categorical("use_trailing", param_grid["use_trailing"]),
+                    "trailing_target_pct": trial.suggest_categorical("trailing_target_pct", param_grid["trailing_target_pct"]),
+                    "trailing_stop_pct": trial.suggest_categorical("trailing_stop_pct", param_grid["trailing_stop_pct"]),
+                }
+                if not params["use_trailing"]:
+                    params["trailing_target_pct"] = None
+                    params["trailing_stop_pct"] = None
+                _, score, stats = TPMStrategy._evaluate_param_combo(params, train_df_dict, metric)
+                msg = f"[TPM Optuna Trial {trial.number}] Params={params} | {metric}: {score:.5f}"
+                print(msg)
+                logger.info(msg)
+                if print_callback:
+                    print_callback(trial.number, params, score)
+                return score
+
+            study = optuna.create_study(direction="maximize",
+                                        sampler=optuna.samplers.TPESampler(n_startup_trials=n_random_trials))
+
+            # Enqueue cache and prev_best
+            if cached:
+                study.enqueue_trial(cached[0])
+            if best_trial_params is not None:
+                study.enqueue_trial(best_trial_params)
+
+            study.optimize(
+                objective,
+                n_trials=n_trials,
+                show_progress_bar=False
+            )
+            best_params = study.best_params
+            for k in param_grid.keys():
+                if k not in best_params:
+                    best_params[k] = param_grid[k][0]
+            if not best_params["use_trailing"]:
+                best_params["trailing_target_pct"] = None
+                best_params["trailing_stop_pct"] = None
+            _, best_score, best_stats = TPMStrategy._evaluate_param_combo(best_params, train_df_dict, metric)
+
+        else:
+            raise ValueError(f"Unknown sampler: {sampler}")
+
+        cache.set(train_hash, (best_params, best_score, best_stats))
+        cache.save()
+        self.set_params(**best_params)
+        return best_params, best_stats

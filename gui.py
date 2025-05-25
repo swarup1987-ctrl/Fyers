@@ -587,19 +587,9 @@ def show_backtest_results(parent, stats, trades, per_window=None):
 
     Button(win, text="Copy Results", command=copy_results).pack(pady=3)
 
-    Label(win, text="Tabular View", font=("Arial", 11, "bold")).pack()
-    frame = Frame(win)
-    frame.pack(fill=BOTH, expand=True, padx=8, pady=8)
-    tree = ttk.Treeview(frame, columns=("entry_time","exit_time","direction","pl","exit_reason"), show="headings")
-    for col in tree["columns"]:
-        tree.heading(col, text=col)
-        tree.column(col, width=150)
-    for t in trades:
-        entry_time = to_human_time(t.get('entry_time', ''))
-        exit_time = to_human_time(t.get('exit_time', ''))
-        tree.insert("", END, values=(entry_time, exit_time, t['direction'], round(t['pl'],2), t['exit_reason']))
-    tree.pack(fill=BOTH, expand=True)
+    # ---- Remove the old tabular trades Treeview section here ----
 
+    # Walk-Forward Window Details Table with Horizontal Scrollbar
     if per_window and len(per_window):
         Label(win, text="Walk-Forward Window Details (including optimal params)", font=("Arial", 11, "bold")).pack(pady=10)
         pw_frame = Frame(win)
@@ -608,13 +598,13 @@ def show_backtest_results(parent, stats, trades, per_window=None):
             "window", "train_start", "test_start", "num_trades", "win", "loss",
             "gross_profit", "gross_loss", "max_drawdown", "capital_end", "best_params", "train_stats"
         ]
-        pw_tree = ttk.Treeview(pw_frame, columns=columns, show="headings")
+        pw_tree = ttk.Treeview(pw_frame, columns=columns, show="headings", height=12)
         for col in columns:
             pw_tree.heading(col, text=col)
             if col in ("best_params", "train_stats"):
-                pw_tree.column(col, width=400)
+                pw_tree.column(col, width=400, minwidth=200, stretch=True)
             else:
-                pw_tree.column(col, width=120)
+                pw_tree.column(col, width=120, minwidth=80, stretch=True)
         for w in per_window:
             pw_tree.insert(
                 "", END,
@@ -633,7 +623,12 @@ def show_backtest_results(parent, stats, trades, per_window=None):
                     str(w.get("train_stats", ""))
                 ]
             )
-        pw_tree.pack(fill=BOTH, expand=True)
+        pw_tree.pack(fill=BOTH, expand=True, side=TOP)
+
+        # Add horizontal scrollbar for the per-window table
+        h_scroll = ttk.Scrollbar(pw_frame, orient="horizontal", command=pw_tree.xview)
+        pw_tree.configure(xscrollcommand=h_scroll.set)
+        h_scroll.pack(fill=X, side=BOTTOM)
 
     Button(win, text="Close", command=win.destroy).pack(pady=10)
 

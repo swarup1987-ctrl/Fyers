@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from datetime import datetime, timedelta, time
 import logging
+from corb import CORBStrategy
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy  # <-- Add your new strategy module here
@@ -34,6 +35,7 @@ def ist_date_and_time(ts_utc):
 STRATEGY_MAP = {
     "deep.boll.vwap.rsi.macd": Intraday15MinStrategy,
     "tpm.ema.rsi.vol": TPMStrategy,  # <-- Add mapping for your new strategy
+    "corb.breakout": CORBStrategy,
 }
 
 class WalkForwardBacktester:

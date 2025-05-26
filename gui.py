@@ -17,7 +17,8 @@ from project_paths import data_path
 
 # --- Strategy imports ---
 from deepseek_strategy import Intraday15MinStrategy
-from tpm import TPMStrategy  # <-- Import the new strategy
+from tpm import TPMStrategy
+from corb import CORBStrategy  # <-- Import CORB strategy
 from walkforward import WalkForwardBacktester
 
 import numbers  # for robust timestamp conversion
@@ -340,8 +341,9 @@ def open_backtest_window(parent):
         textvariable=strategy_var,
         values=[
             "deep.boll.vwap.rsi.macd",
-            "tpm.ema.rsi.vol"
-        ],  # <-- Add new strategy here
+            "tpm.ema.rsi.vol",
+            "corb.breakout"  # Add new strategy here
+        ],
         state="readonly",
         width=30
     )
@@ -408,6 +410,9 @@ def open_backtest_window(parent):
         elif selected == "tpm.ema.rsi.vol":
             active_strategy_instance = TPMStrategy()
             result_label.config(text="Strategy 'tpm.ema.rsi.vol' loaded and ready.", fg="green")
+        elif selected == "corb.breakout":
+            active_strategy_instance = CORBStrategy()
+            result_label.config(text="Strategy 'corb.breakout' loaded and ready.", fg="green")
         else:
             active_strategy_instance = None
             result_label.config(text="No strategy loaded", fg="red")
@@ -531,7 +536,7 @@ def open_backtest_window(parent):
                     if window_stat and isinstance(window_stat, dict):
                         msg += f": trades={window_stat.get('num_trades','?')}, profit={window_stat.get('gross_profit', '?'):.2f}"
                     progress_q.put((val, msg))
-                # Pass trailing params only if TPM strategy is selected
+                # Handle strategy-specific kwargs
                 extra_kwargs = {}
                 if strategy_key == "tpm.ema.rsi.vol":
                     extra_kwargs.update({
@@ -540,6 +545,9 @@ def open_backtest_window(parent):
                         "trailing_target_pct": threshold_pct if use_trailing else None,
                         "trailing_stop_pct": checkpoint_pct if use_trailing else None,
                     })
+                elif strategy_key == "corb.breakout":
+                    # CORBStrategy does not use threshold/checkpoint, but could allow param grid via fit
+                    pass
                 backtester = WalkForwardBacktester(
                     strategy_key=strategy_key,
                     interval=interval,
@@ -555,7 +563,7 @@ def open_backtest_window(parent):
                     n_random_trials=n_random_trials,
                     initial_threshold_pct=threshold_pct if strategy_key == "deep.boll.vwap.rsi.macd" else None,
                     initial_checkpoint_pct=checkpoint_pct if strategy_key == "deep.boll.vwap.rsi.macd" else None,
-                    disable_trailing=not use_trailing,
+                    disable_trailing=not use_trailing if strategy_key in ["deep.boll.vwap.rsi.macd", "tpm.ema.rsi.vol"] else True,
                     **extra_kwargs
                 )
                 results = backtester.run_backtest()
@@ -606,8 +614,6 @@ def show_backtest_results(parent, stats, trades, per_window=None):
         win.update()
 
     Button(win, text="Copy Results", command=copy_results).pack(pady=3)
-
-    # ---- Remove the old tabular trades Treeview section here ----
 
     # Walk-Forward Window Details Table with Horizontal Scrollbar
     if per_window and len(per_window):

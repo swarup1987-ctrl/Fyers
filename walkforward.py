@@ -177,6 +177,7 @@ class WalkForwardBacktester:
         capital = self.capital
         results_per_window = []
         param_log = []
+        winrate_log = []
 
         prev_best_params = None
 
@@ -275,6 +276,13 @@ class WalkForwardBacktester:
             }
             results_per_window.append(window_result)
 
+            # Log for winrate
+            num_trades = window_result.get("num_trades", 0)
+            winrate = win / num_trades if num_trades > 0 else 0.0
+            winrate_log.append(
+                f"Window {idx+1} | Win Rate: {winrate:.2%} | Best Params: {window_result['best_params']}"
+            )
+
             summary_msg = (f"Window {idx+1}: {train_start.date()} - {test_start.date()} | "
                            f"Trades: {len(trades)}, P/L: {gross_profit-gross_loss:.2f}, "
                            f"Best Params: {strategy.params_to_str(best_params) if best_params else 'N/A'}")
@@ -286,6 +294,13 @@ class WalkForwardBacktester:
                     self.progress_callback(idx+1, total_windows, window_result)
                 except Exception as ex:
                     print(f"Progress callback error: {ex}")
+
+        # Write best param by win rate for each window to a .txt file
+        best_param_winrate_path = "best_params_by_winrate.txt"
+        with open(best_param_winrate_path, "w") as f:
+            for line in winrate_log:
+                f.write(line + "\n")
+        print(f"Best params by win rate per window written to {best_param_winrate_path}")
 
         total_trades = len(all_trades)
         wins = sum(1 for t in all_trades if t['pl'] > 0)

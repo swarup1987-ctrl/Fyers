@@ -18,7 +18,8 @@ from project_paths import data_path
 # --- Strategy imports ---
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy
-from corb import CORBStrategy  # <-- Import CORB strategy
+from corb import CORBStrategy
+from orb import ORBStrategy         # <-- Add ORB strategy import
 from walkforward import WalkForwardBacktester
 
 import numbers  # for robust timestamp conversion
@@ -342,7 +343,8 @@ def open_backtest_window(parent):
         values=[
             "deep.boll.vwap.rsi.macd",
             "tpm.ema.rsi.vol",
-            "corb.breakout"  # Add new strategy here
+            "corb.breakout",
+            "orb.riskreward"   # <-- Add new ORB strategy here
         ],
         state="readonly",
         width=30
@@ -375,6 +377,13 @@ def open_backtest_window(parent):
     Label(thresh_ckpt_frame, text="Checkpoint (%):").pack(side=LEFT, padx=5)
     checkpoint_var = StringVar(value="")
     Entry(thresh_ckpt_frame, width=6, textvariable=checkpoint_var).pack(side=LEFT, padx=2)
+
+    # --- ORB RR Input ---
+    orb_rr_frame = Frame(win)
+    orb_rr_frame.pack(pady=10)
+    Label(orb_rr_frame, text="ORB RR Ratio (e.g. 2 for 1:2, 3 for 1:3):").pack(side=LEFT, padx=5)
+    orb_rr_var = StringVar(value="2.0")
+    Entry(orb_rr_frame, width=6, textvariable=orb_rr_var).pack(side=LEFT, padx=2)
 
     # --- Sampler selection for smart grid search ---
     sampler_frame = Frame(win)
@@ -413,6 +422,13 @@ def open_backtest_window(parent):
         elif selected == "corb.breakout":
             active_strategy_instance = CORBStrategy()
             result_label.config(text="Strategy 'corb.breakout' loaded and ready.", fg="green")
+        elif selected == "orb.riskreward":
+            try:
+                rr_val = float(orb_rr_var.get())
+            except Exception:
+                rr_val = 2.0
+            active_strategy_instance = ORBStrategy(rr_ratio=rr_val)
+            result_label.config(text="Strategy 'orb.riskreward' loaded and ready.", fg="green")
         else:
             active_strategy_instance = None
             result_label.config(text="No strategy loaded", fg="red")
@@ -476,6 +492,7 @@ def open_backtest_window(parent):
         n_random_trials = n_random_trials_var.get()
         threshold_str = threshold_var.get().strip()
         checkpoint_str = checkpoint_var.get().strip()
+        orb_rr_str = orb_rr_var.get().strip()
         if not symbol:
             messagebox.showwarning("Warning", "Please select a symbol.")
             return
@@ -499,6 +516,16 @@ def open_backtest_window(parent):
                     raise ValueError
             except Exception:
                 messagebox.showwarning("Warning", "Please enter valid positive numbers for Threshold and Checkpoint (%), or leave both empty.")
+                return
+
+        orb_rr_ratio = None
+        if strategy_key == "orb.riskreward":
+            try:
+                orb_rr_ratio = float(orb_rr_str)
+                if orb_rr_ratio <= 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showwarning("Warning", "Please enter a valid RR ratio for ORB (e.g. 2 or 3).")
                 return
 
         # Progress bar window
@@ -546,8 +573,11 @@ def open_backtest_window(parent):
                         "trailing_stop_pct": checkpoint_pct if use_trailing else None,
                     })
                 elif strategy_key == "corb.breakout":
-                    # CORBStrategy does not use threshold/checkpoint, but could allow param grid via fit
                     pass
+                elif strategy_key == "orb.riskreward":
+                    extra_kwargs.update({
+                        "orb_rr_ratio": orb_rr_ratio
+                    })
                 backtester = WalkForwardBacktester(
                     strategy_key=strategy_key,
                     interval=interval,
@@ -615,7 +645,6 @@ def show_backtest_results(parent, stats, trades, per_window=None):
 
     Button(win, text="Copy Results", command=copy_results).pack(pady=3)
 
-    # Walk-Forward Window Details Table with Horizontal Scrollbar
     if per_window and len(per_window):
         Label(win, text="Walk-Forward Window Details (including optimal params)", font=("Arial", 11, "bold")).pack(pady=10)
         pw_frame = Frame(win)
@@ -650,8 +679,6 @@ def show_backtest_results(parent, stats, trades, per_window=None):
                 ]
             )
         pw_tree.pack(fill=BOTH, expand=True, side=TOP)
-
-        # Add horizontal scrollbar for the per-window table
         h_scroll = ttk.Scrollbar(pw_frame, orient="horizontal", command=pw_tree.xview)
         pw_tree.configure(xscrollcommand=h_scroll.set)
         h_scroll.pack(fill=X, side=BOTTOM)

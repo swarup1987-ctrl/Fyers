@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime, timedelta, time
 import logging
 from corb import CORBStrategy
+from orb import ORBStrategy  # <-- Import the new ORB strategy
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy  # <-- Add your new strategy module here
@@ -35,8 +36,9 @@ def ist_date_and_time(ts_utc):
 
 STRATEGY_MAP = {
     "deep.boll.vwap.rsi.macd": Intraday15MinStrategy,
-    "tpm.ema.rsi.vol": TPMStrategy,  # <-- Add mapping for your new strategy
+    "tpm.ema.rsi.vol": TPMStrategy,
     "corb.breakout": CORBStrategy,
+    "orb.riskreward": ORBStrategy,  # <-- Add mapping for your new ORB strategy
 }
 
 class WalkForwardBacktester:
@@ -64,6 +66,8 @@ class WalkForwardBacktester:
         stop_loss_pct=None,
         trailing_target_pct=None,
         trailing_stop_pct=None,
+        # For ORBStrategy specific params
+        orb_rr_ratio=None,
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -89,6 +93,9 @@ class WalkForwardBacktester:
         self.trailing_target_pct = trailing_target_pct
         self.trailing_stop_pct = trailing_stop_pct
 
+        # ORBStrategy-specific param
+        self.orb_rr_ratio = orb_rr_ratio
+
         self.strategy_cls = STRATEGY_MAP.get(strategy_key)
         if self.strategy_cls is None:
             raise ValueError(f"Strategy '{strategy_key}' not implemented.")
@@ -101,6 +108,11 @@ class WalkForwardBacktester:
                 trailing_target_pct=trailing_target_pct,
                 trailing_stop_pct=trailing_stop_pct,
                 use_trailing=not disable_trailing
+            )
+        elif self.strategy_key == "orb.riskreward":
+            # ORBStrategy expects rr_ratio argument
+            strategy_params = dict(
+                rr_ratio=orb_rr_ratio or 2.0
             )
         else:
             strategy_params = dict(
@@ -177,6 +189,10 @@ class WalkForwardBacktester:
                     trailing_target_pct=self.trailing_target_pct,
                     trailing_stop_pct=self.trailing_stop_pct,
                     use_trailing=not self.disable_trailing
+                )
+            elif self.strategy_key == "orb.riskreward":
+                strategy_params = dict(
+                    rr_ratio=self.orb_rr_ratio or 2.0
                 )
             else:
                 strategy_params = dict(

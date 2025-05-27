@@ -6,6 +6,7 @@ from corb import CORBStrategy
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy  # <-- Add your new strategy module here
+from inspect import signature
 
 # Timezone support for IST conversion
 try:
@@ -92,9 +93,9 @@ class WalkForwardBacktester:
         if self.strategy_cls is None:
             raise ValueError(f"Strategy '{strategy_key}' not implemented.")
 
-        # Instantiate the strategy with correct params, depending on strategy
+        # Prepare params for strategy constructor
         if self.strategy_key == "tpm.ema.rsi.vol":
-            self.strategy = self.strategy_cls(
+            strategy_params = dict(
                 profit_target_pct=profit_target_pct or 0.9,
                 stop_loss_pct=stop_loss_pct or 0.45,
                 trailing_target_pct=trailing_target_pct,
@@ -102,10 +103,14 @@ class WalkForwardBacktester:
                 use_trailing=not disable_trailing
             )
         else:
-            self.strategy = self.strategy_cls(
+            strategy_params = dict(
                 initial_threshold_pct=self.initial_threshold_pct,
                 initial_checkpoint_pct=self.initial_checkpoint_pct
             )
+        # Filter out params not in constructor signature
+        accepted_args = set(signature(self.strategy_cls.__init__).parameters)
+        strategy_params = {k: v for k, v in strategy_params.items() if k in accepted_args}
+        self.strategy = self.strategy_cls(**strategy_params)
 
         self._logger = logging.getLogger("WalkForwardLogger")
         file_handler = logging.FileHandler(self.log_file)
@@ -166,7 +171,7 @@ class WalkForwardBacktester:
         for idx, (train_df, test_df, train_start, test_start) in enumerate(windows):
             # Instantiate correct strategy with current params
             if self.strategy_key == "tpm.ema.rsi.vol":
-                strategy = self.strategy_cls(
+                strategy_params = dict(
                     profit_target_pct=self.profit_target_pct or 0.9,
                     stop_loss_pct=self.stop_loss_pct or 0.45,
                     trailing_target_pct=self.trailing_target_pct,
@@ -174,10 +179,14 @@ class WalkForwardBacktester:
                     use_trailing=not self.disable_trailing
                 )
             else:
-                strategy = self.strategy_cls(
+                strategy_params = dict(
                     initial_threshold_pct=self.initial_threshold_pct,
                     initial_checkpoint_pct=self.initial_checkpoint_pct
                 )
+            accepted_args = set(signature(self.strategy_cls.__init__).parameters)
+            strategy_params = {k: v for k, v in strategy_params.items() if k in accepted_args}
+            strategy = self.strategy_cls(**strategy_params)
+
             best_params = None
             best_stats = None
             if self.param_optimization and hasattr(strategy, "fit"):

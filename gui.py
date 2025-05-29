@@ -19,7 +19,8 @@ from project_paths import data_path
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy
 from corb import CORBStrategy
-from orb import ORBStrategy         # <-- Add ORB strategy import
+from orb import ORBStrategy
+from vrsi import VRSIStrategy         # <-- Add VRSI strategy import
 from walkforward import WalkForwardBacktester
 
 import numbers  # for robust timestamp conversion
@@ -344,7 +345,8 @@ def open_backtest_window(parent):
             "deep.boll.vwap.rsi.macd",
             "tpm.ema.rsi.vol",
             "corb.breakout",
-            "orb.riskreward"   # <-- Add new ORB strategy here
+            "orb.riskreward",
+            "vrsi.vwap.rsi.pivot"    # <-- Add VRSI strategy here
         ],
         state="readonly",
         width=30
@@ -384,6 +386,16 @@ def open_backtest_window(parent):
     Label(orb_rr_frame, text="ORB RR Ratio (e.g. 2 for 1:2, 3 for 1:3):").pack(side=LEFT, padx=5)
     orb_rr_var = StringVar(value="2.0")
     Entry(orb_rr_frame, width=6, textvariable=orb_rr_var).pack(side=LEFT, padx=2)
+
+    # --- VRSI specific params ---
+    vrsi_frame = Frame(win)
+    vrsi_frame.pack(pady=10)
+    Label(vrsi_frame, text="VRSI RSI Period:").pack(side=LEFT, padx=5)
+    vrsi_rsi_period_var = StringVar(value="14")
+    Entry(vrsi_frame, width=5, textvariable=vrsi_rsi_period_var).pack(side=LEFT, padx=2)
+    Label(vrsi_frame, text="VRSI Daily Loss Cap % (e.g. 0.01):").pack(side=LEFT, padx=5)
+    vrsi_daily_loss_var = StringVar(value="0.01")
+    Entry(vrsi_frame, width=7, textvariable=vrsi_daily_loss_var).pack(side=LEFT, padx=2)
 
     # --- Sampler selection for smart grid search ---
     sampler_frame = Frame(win)
@@ -429,6 +441,17 @@ def open_backtest_window(parent):
                 rr_val = 2.0
             active_strategy_instance = ORBStrategy(rr_ratio=rr_val)
             result_label.config(text="Strategy 'orb.riskreward' loaded and ready.", fg="green")
+        elif selected == "vrsi.vwap.rsi.pivot":
+            try:
+                rsi_period = int(vrsi_rsi_period_var.get())
+            except Exception:
+                rsi_period = 14
+            try:
+                daily_loss = float(vrsi_daily_loss_var.get())
+            except Exception:
+                daily_loss = 0.01
+            active_strategy_instance = VRSIStrategy(rsi_period=rsi_period, daily_loss_pct=daily_loss)
+            result_label.config(text="Strategy 'vrsi.vwap.rsi.pivot' loaded and ready.", fg="green")
         else:
             active_strategy_instance = None
             result_label.config(text="No strategy loaded", fg="red")
@@ -493,6 +516,8 @@ def open_backtest_window(parent):
         threshold_str = threshold_var.get().strip()
         checkpoint_str = checkpoint_var.get().strip()
         orb_rr_str = orb_rr_var.get().strip()
+        vrsi_rsi_period_str = vrsi_rsi_period_var.get().strip()
+        vrsi_daily_loss_str = vrsi_daily_loss_var.get().strip()
         if not symbol:
             messagebox.showwarning("Warning", "Please select a symbol.")
             return
@@ -503,7 +528,6 @@ def open_backtest_window(parent):
             messagebox.showwarning("Warning", "Please select a strategy.")
             return
 
-        # Make threshold/checkpoint optional
         use_trailing = bool(threshold_str and checkpoint_str)
         threshold_pct = None
         checkpoint_pct = None
@@ -528,6 +552,24 @@ def open_backtest_window(parent):
                 messagebox.showwarning("Warning", "Please enter a valid RR ratio for ORB (e.g. 2 or 3).")
                 return
 
+        vrsi_rsi_period = None
+        vrsi_daily_loss = None
+        if strategy_key == "vrsi.vwap.rsi.pivot":
+            try:
+                vrsi_rsi_period = int(vrsi_rsi_period_str)
+                if vrsi_rsi_period <= 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showwarning("Warning", "Please enter a valid RSI period for VRSI.")
+                return
+            try:
+                vrsi_daily_loss = float(vrsi_daily_loss_str)
+                if vrsi_daily_loss < 0:
+                    raise ValueError
+            except Exception:
+                messagebox.showwarning("Warning", "Please enter a valid VRSI daily loss cap (e.g. 0.01).")
+                return
+
         # Progress bar window
         progress_win = Toplevel(win)
         progress_win.title("Backtest Progress")
@@ -538,7 +580,6 @@ def open_backtest_window(parent):
         progress_label = Label(progress_win, text="Initializing ...")
         progress_label.pack()
 
-        # For thread-safe communication from backtest to GUI
         progress_q = queue.Queue()
 
         def update_progress():
@@ -563,7 +604,6 @@ def open_backtest_window(parent):
                     if window_stat and isinstance(window_stat, dict):
                         msg += f": trades={window_stat.get('num_trades','?')}, profit={window_stat.get('gross_profit', '?'):.2f}"
                     progress_q.put((val, msg))
-                # Handle strategy-specific kwargs
                 extra_kwargs = {}
                 if strategy_key == "tpm.ema.rsi.vol":
                     extra_kwargs.update({
@@ -577,6 +617,11 @@ def open_backtest_window(parent):
                 elif strategy_key == "orb.riskreward":
                     extra_kwargs.update({
                         "orb_rr_ratio": orb_rr_ratio
+                    })
+                elif strategy_key == "vrsi.vwap.rsi.pivot":
+                    extra_kwargs.update({
+                        "vrsi_rsi_period": vrsi_rsi_period,
+                        "vrsi_daily_loss_pct": vrsi_daily_loss
                     })
                 backtester = WalkForwardBacktester(
                     strategy_key=strategy_key,

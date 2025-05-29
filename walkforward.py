@@ -3,10 +3,11 @@ import pandas as pd
 from datetime import datetime, timedelta, time
 import logging
 from corb import CORBStrategy
-from orb import ORBStrategy  # <-- Import the new ORB strategy
+from orb import ORBStrategy
+from vrsi import VRSIStrategy  # <-- Import the VRSI strategy
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
-from tpm import TPMStrategy  # <-- Add your new strategy module here
+from tpm import TPMStrategy
 from inspect import signature
 
 # Timezone support for IST conversion
@@ -38,7 +39,8 @@ STRATEGY_MAP = {
     "deep.boll.vwap.rsi.macd": Intraday15MinStrategy,
     "tpm.ema.rsi.vol": TPMStrategy,
     "corb.breakout": CORBStrategy,
-    "orb.riskreward": ORBStrategy,  # <-- Add mapping for your new ORB strategy
+    "orb.riskreward": ORBStrategy,
+    "vrsi.vwap.rsi.pivot": VRSIStrategy,  # <-- Register new strategy
 }
 
 class WalkForwardBacktester:
@@ -68,6 +70,12 @@ class WalkForwardBacktester:
         trailing_stop_pct=None,
         # For ORBStrategy specific params
         orb_rr_ratio=None,
+        # For VRSI params
+        vrsi_rsi_period=None,
+        vrsi_vwap_window=None,
+        vrsi_stop_type=None,
+        vrsi_target_type=None,
+        vrsi_daily_loss_pct=None,
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -96,6 +104,13 @@ class WalkForwardBacktester:
         # ORBStrategy-specific param
         self.orb_rr_ratio = orb_rr_ratio
 
+        # VRSIStrategy-specific params
+        self.vrsi_rsi_period = vrsi_rsi_period
+        self.vrsi_vwap_window = vrsi_vwap_window
+        self.vrsi_stop_type = vrsi_stop_type
+        self.vrsi_target_type = vrsi_target_type
+        self.vrsi_daily_loss_pct = vrsi_daily_loss_pct
+
         self.strategy_cls = STRATEGY_MAP.get(strategy_key)
         if self.strategy_cls is None:
             raise ValueError(f"Strategy '{strategy_key}' not implemented.")
@@ -110,9 +125,16 @@ class WalkForwardBacktester:
                 use_trailing=not disable_trailing
             )
         elif self.strategy_key == "orb.riskreward":
-            # ORBStrategy expects rr_ratio argument
             strategy_params = dict(
                 rr_ratio=orb_rr_ratio or 2.0
+            )
+        elif self.strategy_key == "vrsi.vwap.rsi.pivot":
+            strategy_params = dict(
+                rsi_period=vrsi_rsi_period or 14,
+                vwap_window=vrsi_vwap_window,
+                stop_type=vrsi_stop_type or "pivot",
+                target_type=vrsi_target_type or "pivot",
+                daily_loss_pct=vrsi_daily_loss_pct or 0.01
             )
         else:
             strategy_params = dict(
@@ -195,6 +217,14 @@ class WalkForwardBacktester:
                 strategy_params = dict(
                     rr_ratio=self.orb_rr_ratio or 2.0
                 )
+            elif self.strategy_key == "vrsi.vwap.rsi.pivot":
+                strategy_params = dict(
+                    rsi_period=self.vrsi_rsi_period or 14,
+                    vwap_window=self.vrsi_vwap_window,
+                    stop_type=self.vrsi_stop_type or "pivot",
+                    target_type=self.vrsi_target_type or "pivot",
+                    daily_loss_pct=self.vrsi_daily_loss_pct or 0.01
+                )
             else:
                 strategy_params = dict(
                     initial_threshold_pct=self.initial_threshold_pct,
@@ -248,7 +278,6 @@ class WalkForwardBacktester:
                 gross_loss = stats.get("gross_loss", 0)
                 max_drawdown = stats.get("max_drawdown", 0) if "max_drawdown" in stats else 0
             else:
-                # Fallback to simulate_trades for legacy strategies
                 trades, equity, win, loss, gross_profit, gross_loss, max_drawdown = self.simulate_trades(
                     test_df, signals, capital,
                     initial_threshold_pct=self.initial_threshold_pct,
@@ -276,7 +305,6 @@ class WalkForwardBacktester:
             }
             results_per_window.append(window_result)
 
-            # Log for winrate
             num_trades = window_result.get("num_trades", 0)
             winrate = win / num_trades if num_trades > 0 else 0.0
             winrate_log.append(
@@ -295,7 +323,6 @@ class WalkForwardBacktester:
                 except Exception as ex:
                     print(f"Progress callback error: {ex}")
 
-        # Write best param by win rate for each window to a .txt file
         best_param_winrate_path = "best_params_by_winrate.txt"
         with open(best_param_winrate_path, "w") as f:
             for line in winrate_log:

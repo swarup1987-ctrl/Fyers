@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, time
 import logging
 from corb import CORBStrategy
 from orb import ORBStrategy
-from vrsi import VRSIStrategy  # <-- Import the VRSI strategy
+from vrsi import VRSIStrategy
+from vema import VEMAStrategy  # <-- Import the new VEMA strategy
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy
@@ -40,7 +41,8 @@ STRATEGY_MAP = {
     "tpm.ema.rsi.vol": TPMStrategy,
     "corb.breakout": CORBStrategy,
     "orb.riskreward": ORBStrategy,
-    "vrsi.vwap.rsi.pivot": VRSIStrategy,  # <-- Register new strategy
+    "vrsi.vwap.rsi.pivot": VRSIStrategy,
+    "vema.ema.cross": VEMAStrategy,  # <-- Register new strategy
 }
 
 class WalkForwardBacktester:
@@ -76,6 +78,11 @@ class WalkForwardBacktester:
         vrsi_stop_type=None,
         vrsi_target_type=None,
         vrsi_daily_loss_pct=None,
+        # For VEMAStrategy params
+        vema_stop_loss_pct=None,
+        vema_target_pct=None,
+        vema_vol_window=None,
+        vema_daily_loss_cap=None,
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -111,6 +118,12 @@ class WalkForwardBacktester:
         self.vrsi_target_type = vrsi_target_type
         self.vrsi_daily_loss_pct = vrsi_daily_loss_pct
 
+        # VEMAStrategy-specific params
+        self.vema_stop_loss_pct = vema_stop_loss_pct
+        self.vema_target_pct = vema_target_pct
+        self.vema_vol_window = vema_vol_window
+        self.vema_daily_loss_cap = vema_daily_loss_cap
+
         self.strategy_cls = STRATEGY_MAP.get(strategy_key)
         if self.strategy_cls is None:
             raise ValueError(f"Strategy '{strategy_key}' not implemented.")
@@ -135,6 +148,13 @@ class WalkForwardBacktester:
                 stop_type=vrsi_stop_type or "pivot",
                 target_type=vrsi_target_type or "pivot",
                 daily_loss_pct=vrsi_daily_loss_pct or 0.01
+            )
+        elif self.strategy_key == "vema.ema.cross":
+            strategy_params = dict(
+                stop_loss_pct=vema_stop_loss_pct or 0.5,
+                target_pct=vema_target_pct or 0.8,
+                vol_window=vema_vol_window or 20,
+                daily_loss_cap=vema_daily_loss_cap or 0.01,
             )
         else:
             strategy_params = dict(
@@ -224,6 +244,13 @@ class WalkForwardBacktester:
                     stop_type=self.vrsi_stop_type or "pivot",
                     target_type=self.vrsi_target_type or "pivot",
                     daily_loss_pct=self.vrsi_daily_loss_pct or 0.01
+                )
+            elif self.strategy_key == "vema.ema.cross":
+                strategy_params = dict(
+                    stop_loss_pct=self.vema_stop_loss_pct or 0.5,
+                    target_pct=self.vema_target_pct or 0.8,
+                    vol_window=self.vema_vol_window or 20,
+                    daily_loss_cap=self.vema_daily_loss_cap or 0.01,
                 )
             else:
                 strategy_params = dict(

@@ -10,6 +10,7 @@ from tpm import TPMStrategy
 from corb import CORBStrategy
 from orb import ORBStrategy
 from vrsi import VRSIStrategy
+from vema import VEMAStrategy  # <-- Import the new strategy
 from walkforward import WalkForwardBacktester
 import numbers
 from datetime import datetime
@@ -21,7 +22,6 @@ except ImportError:
     from pytz import timezone as ZoneInfo
 IST = ZoneInfo("Asia/Kolkata")
 
-# Helper for timestamp display
 def to_human_time(ts):
     try:
         if ts is None:
@@ -50,7 +50,6 @@ def to_human_time(ts):
     except Exception:
         return str(ts)
 
-# This function can be imported by gui_main.py and used as the main backtest window
 def open_backtest_window(parent):
     from gui_main import symbol_data  # Use symbol master from main GUI
 
@@ -149,12 +148,29 @@ def open_backtest_window(parent):
             "tpm.ema.rsi.vol",
             "corb.breakout",
             "orb.riskreward",
-            "vrsi.vwap.rsi.pivot"
+            "vrsi.vwap.rsi.pivot",
+            "vema.ema.cross",  # <-- Add VEMA strategy to the list
         ],
         state="readonly",
         width=30
     )
     strategy_dropdown.pack(side=LEFT, padx=5)
+
+    # VEMA parameter fields
+    vema_frame = Frame(win)
+    vema_frame.pack(pady=10)
+    Label(vema_frame, text="VEMA Stop Loss %:").pack(side=LEFT, padx=5)
+    vema_stop_loss_var = StringVar(value="0.5")
+    Entry(vema_frame, width=5, textvariable=vema_stop_loss_var).pack(side=LEFT, padx=2)
+    Label(vema_frame, text="VEMA Target %:").pack(side=LEFT, padx=5)
+    vema_target_var = StringVar(value="0.8")
+    Entry(vema_frame, width=5, textvariable=vema_target_var).pack(side=LEFT, padx=2)
+    Label(vema_frame, text="VEMA Vol MA Window:").pack(side=LEFT, padx=5)
+    vema_vol_window_var = StringVar(value="20")
+    Entry(vema_frame, width=5, textvariable=vema_vol_window_var).pack(side=LEFT, padx=2)
+    Label(vema_frame, text="VEMA Daily Loss Cap %:").pack(side=LEFT, padx=5)
+    vema_daily_loss_var = StringVar(value="0.01")
+    Entry(vema_frame, width=7, textvariable=vema_daily_loss_var).pack(side=LEFT, padx=2)
 
     opt_frame = Frame(win)
     opt_frame.pack(pady=10)
@@ -254,6 +270,30 @@ def open_backtest_window(parent):
                 daily_loss = 0.01
             active_strategy_instance = VRSIStrategy(rsi_period=rsi_period, daily_loss_pct=daily_loss)
             result_label.config(text="Strategy 'vrsi.vwap.rsi.pivot' loaded and ready.", fg="green")
+        elif selected == "vema.ema.cross":
+            try:
+                stop_loss = float(vema_stop_loss_var.get())
+            except Exception:
+                stop_loss = 0.5
+            try:
+                target = float(vema_target_var.get())
+            except Exception:
+                target = 0.8
+            try:
+                vol_window = int(vema_vol_window_var.get())
+            except Exception:
+                vol_window = 20
+            try:
+                daily_loss = float(vema_daily_loss_var.get())
+            except Exception:
+                daily_loss = 0.01
+            active_strategy_instance = VEMAStrategy(
+                stop_loss_pct=stop_loss,
+                target_pct=target,
+                vol_window=vol_window,
+                daily_loss_cap=daily_loss
+            )
+            result_label.config(text="Strategy 'vema.ema.cross' loaded and ready.", fg="green")
         else:
             active_strategy_instance = None
             result_label.config(text="No strategy loaded", fg="red")
@@ -322,6 +362,11 @@ def open_backtest_window(parent):
         orb_rr_str = orb_rr_var.get().strip()
         vrsi_rsi_period_str = vrsi_rsi_period_var.get().strip()
         vrsi_daily_loss_str = vrsi_daily_loss_var.get().strip()
+        vema_stop_loss_str = vema_stop_loss_var.get().strip()
+        vema_target_str = vema_target_var.get().strip()
+        vema_vol_window_str = vema_vol_window_var.get().strip()
+        vema_daily_loss_str = vema_daily_loss_var.get().strip()
+
         if not symbol:
             messagebox.showwarning("Warning", "Please select a symbol.")
             return
@@ -374,6 +419,36 @@ def open_backtest_window(parent):
                 messagebox.showwarning("Warning", "Please enter a valid VRSI daily loss cap (e.g. 0.01).")
                 return
 
+        vema_stop_loss = None
+        vema_target = None
+        vema_vol_window = None
+        vema_daily_loss = None
+        if strategy_key == "vema.ema.cross":
+            try:
+                vema_stop_loss = float(vema_stop_loss_str)
+                if vema_stop_loss <= 0:
+                    raise ValueError
+            except Exception:
+                vema_stop_loss = 0.5
+            try:
+                vema_target = float(vema_target_str)
+                if vema_target <= 0:
+                    raise ValueError
+            except Exception:
+                vema_target = 0.8
+            try:
+                vema_vol_window = int(vema_vol_window_str)
+                if vema_vol_window <= 0:
+                    raise ValueError
+            except Exception:
+                vema_vol_window = 20
+            try:
+                vema_daily_loss = float(vema_daily_loss_str)
+                if vema_daily_loss < 0:
+                    raise ValueError
+            except Exception:
+                vema_daily_loss = 0.01
+
         progress_win = Toplevel(win)
         progress_win.title("Backtest Progress")
         progress_win.geometry("400x120")
@@ -425,6 +500,13 @@ def open_backtest_window(parent):
                     extra_kwargs.update({
                         "vrsi_rsi_period": vrsi_rsi_period,
                         "vrsi_daily_loss_pct": vrsi_daily_loss
+                    })
+                elif strategy_key == "vema.ema.cross":
+                    extra_kwargs.update({
+                        "vema_stop_loss_pct": vema_stop_loss,
+                        "vema_target_pct": vema_target,
+                        "vema_vol_window": vema_vol_window,
+                        "vema_daily_loss_cap": vema_daily_loss,
                     })
                 backtester = WalkForwardBacktester(
                     strategy_key=strategy_key,

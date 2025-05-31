@@ -197,13 +197,13 @@ class Intraday15MinStrategy:
         buy_checks = [
             df['close'] > df['vwap'],
             macd_cross_up,
-            df['rsi'] < 75,
+            df['rsi'] < 80,
             df['close'] <= df['lower_band'] + 0.25 * df['atr']
         ]
         sell_checks = [
             df['close'] < df['vwap'],
             macd_cross_down,
-            df['rsi'] > 25,
+            df['rsi'] > 22,
             df['close'] >= df['upper_band'] - 0.25 * df['atr']
         ]
         buy_condition = sum(buy_checks) >= 3

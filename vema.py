@@ -32,9 +32,9 @@ def hash_train_df(train_df):
 
 class VEMAStrategy:
     """
-    EMA cross strategy with volume filter for 15-min charts.
-    - Buy: EMA(fast) crosses above EMA(slow), and volume > moving average volume.
-    - Sell: EMA(fast) crosses below EMA(slow), and volume > moving average volume.
+    EMA9/EMA21 cross strategy with volume filter for 15-min charts.
+    - Buy: EMA9 crosses above EMA21, and volume > moving average volume.
+    - Sell: EMA9 crosses below EMA21, and volume > moving average volume.
     - Stop loss and target optimized.
     """
 
@@ -42,23 +42,17 @@ class VEMAStrategy:
                  stop_loss_pct=0.5,   # Percentage (e.g., 0.5 for 0.5%)
                  target_pct=0.8,      # Percentage (e.g., 0.8 for 0.8%)
                  vol_window=20,       # Volume moving average window
-                 ema_fast=9,         # EMA fast period (was fixed, now tunable)
-                 ema_slow=21,        # EMA slow period (was fixed, now tunable)
-                 daily_loss_cap=0.01 # 1% daily loss cap (optional)
+                 daily_loss_cap=0.01  # 1% daily loss cap (optional)
                  ):
         self.stop_loss_pct = stop_loss_pct
         self.target_pct = target_pct
         self.vol_window = vol_window
-        self.ema_fast = ema_fast
-        self.ema_slow = ema_slow
         self.daily_loss_cap = daily_loss_cap
         self.param_cache = ParamCache()
         self._params = {
             "stop_loss_pct": stop_loss_pct,
             "target_pct": target_pct,
             "vol_window": vol_window,
-            "ema_fast": ema_fast,
-            "ema_slow": ema_slow,
             "daily_loss_cap": daily_loss_cap
         }
 
@@ -70,8 +64,6 @@ class VEMAStrategy:
         self.stop_loss_pct = self._params.get("stop_loss_pct", 0.5)
         self.target_pct = self._params.get("target_pct", 0.8)
         self.vol_window = self._params.get("vol_window", 20)
-        self.ema_fast = self._params.get("ema_fast", 9)
-        self.ema_slow = self._params.get("ema_slow", 21)
         self.daily_loss_cap = self._params.get("daily_loss_cap", 0.01)
 
     def params_to_str(self, params=None):
@@ -82,7 +74,7 @@ class VEMAStrategy:
     def fit(self, train_df, param_grid=None, sampler="bayesian", n_trials=8, n_random_trials=3,
             prev_best_params=None, print_callback=None):
         """
-        Param optimization for stop_loss_pct, target_pct, vol_window, ema_fast, ema_slow.
+        Param optimization for stop_loss_pct and target_pct.
         Keeps search space small for efficiency.
         """
         h = hash_train_df(train_df)
@@ -94,29 +86,16 @@ class VEMAStrategy:
 
         import optuna
 
-        # Grid for optimization
+        # Small, reasonable grid to keep Optuna light
         stop_loss_space = [0.4, 0.5, 0.6]   # %
         target_space = [0.7, 0.8, 0.9]      # %
         vol_window_space = [15, 20, 25]     # optional
-        ema_fast_space = [7, 8, 9]
-        ema_slow_space = [20, 21, 26]
 
         def objective(trial):
             stop_loss_pct = trial.suggest_categorical("stop_loss_pct", stop_loss_space)
             target_pct = trial.suggest_categorical("target_pct", target_space)
             vol_window = trial.suggest_categorical("vol_window", vol_window_space)
-            ema_fast = trial.suggest_categorical("ema_fast", ema_fast_space)
-            ema_slow = trial.suggest_categorical("ema_slow", ema_slow_space)
-            # Avoid degenerate fast == slow
-            if ema_fast >= ema_slow:
-                return -1e6  # return bad score to skip this config
-            self.set_params(
-                stop_loss_pct=stop_loss_pct,
-                target_pct=target_pct,
-                vol_window=vol_window,
-                ema_fast=ema_fast,
-                ema_slow=ema_slow
-            )
+            self.set_params(stop_loss_pct=stop_loss_pct, target_pct=target_pct, vol_window=vol_window)
             signals = self.generate_signals(train_df)
             stats = self.backtest_on_signals(train_df, signals)
             # Use win rate for score, but you can use Sharpe etc. if preferred
@@ -137,12 +116,12 @@ class VEMAStrategy:
 
     def generate_signals(self, df):
         df = df.copy()
-        df["ema_fast"] = df["close"].ewm(span=self.ema_fast, adjust=False).mean()
-        df["ema_slow"] = df["close"].ewm(span=self.ema_slow, adjust=False).mean()
+        df["ema9"] = df["close"].ewm(span=9, adjust=False).mean()
+        df["ema21"] = df["close"].ewm(span=21, adjust=False).mean()
         df["vol_ma"] = df["volume"].rolling(self.vol_window, min_periods=1).mean()
-        # Cross above: prev ema_fast <= prev ema_slow and now ema_fast > ema_slow
-        cross_above = (df["ema_fast"].shift(1) <= df["ema_slow"].shift(1)) & (df["ema_fast"] > df["ema_slow"])
-        cross_below = (df["ema_fast"].shift(1) >= df["ema_slow"].shift(1)) & (df["ema_fast"] < df["ema_slow"])
+        # Cross above: prev ema9 <= prev ema21 and now ema9 > ema21
+        cross_above = (df["ema9"].shift(1) <= df["ema21"].shift(1)) & (df["ema9"] > df["ema21"])
+        cross_below = (df["ema9"].shift(1) >= df["ema21"].shift(1)) & (df["ema9"] < df["ema21"])
         above_avg_vol = df["volume"] > df["vol_ma"]
 
         signals = []
@@ -282,19 +261,3 @@ class VEMAStrategy:
             "win": win,
             "loss": loss,
             "gross_profit": gross_profit,
-            "gross_loss": gross_loss,
-            "max_drawdown": max_drawdown,
-            "trades": trades,
-            "equity": equity,
-            "sharpe": self.compute_sharpe(equity)
-        }
-        return stats
-
-    @staticmethod
-    def compute_sharpe(equity_curve):
-        if not equity_curve or len(equity_curve) < 2:
-            return np.nan
-        rets = np.diff(equity_curve)
-        if rets.std() == 0:
-            return 0
-        return np.mean(rets) / np.std(rets) * np.sqrt(252)

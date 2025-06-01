@@ -5,7 +5,7 @@ import logging
 from corb import CORBStrategy
 from orb import ORBStrategy
 from vrsi import VRSIStrategy
-from vema import VEMAStrategy  # <-- Import the new VEMA strategy
+from vema import VEMAStrategy
 import resampler
 from deepseek_strategy import Intraday15MinStrategy
 from tpm import TPMStrategy
@@ -42,7 +42,7 @@ STRATEGY_MAP = {
     "corb.breakout": CORBStrategy,
     "orb.riskreward": ORBStrategy,
     "vrsi.vwap.rsi.pivot": VRSIStrategy,
-    "vema.ema.cross": VEMAStrategy,  # <-- Register new strategy
+    "vema.ema.cross": VEMAStrategy,
 }
 
 class WalkForwardBacktester:
@@ -65,7 +65,7 @@ class WalkForwardBacktester:
         initial_threshold_pct=None,
         initial_checkpoint_pct=None,
         disable_trailing=False,
-        # For TPMStrategy specific params (optional, passthrough)
+        # For TPMStrategy specific params
         profit_target_pct=None,
         stop_loss_pct=None,
         trailing_target_pct=None,
@@ -83,6 +83,8 @@ class WalkForwardBacktester:
         vema_target_pct=None,
         vema_vol_window=None,
         vema_daily_loss_cap=None,
+        vema_ema_fast=None,
+        vema_ema_slow=None,
     ):
         self.strategy_key = strategy_key
         self.interval = interval
@@ -123,6 +125,8 @@ class WalkForwardBacktester:
         self.vema_target_pct = vema_target_pct
         self.vema_vol_window = vema_vol_window
         self.vema_daily_loss_cap = vema_daily_loss_cap
+        self.vema_ema_fast = vema_ema_fast
+        self.vema_ema_slow = vema_ema_slow
 
         self.strategy_cls = STRATEGY_MAP.get(strategy_key)
         if self.strategy_cls is None:
@@ -154,6 +158,8 @@ class WalkForwardBacktester:
                 stop_loss_pct=vema_stop_loss_pct or 0.5,
                 target_pct=vema_target_pct or 0.8,
                 vol_window=vema_vol_window or 20,
+                ema_fast=vema_ema_fast or 9,
+                ema_slow=vema_ema_slow or 21,
                 daily_loss_cap=vema_daily_loss_cap or 0.01,
             )
         else:
@@ -161,7 +167,6 @@ class WalkForwardBacktester:
                 initial_threshold_pct=self.initial_threshold_pct,
                 initial_checkpoint_pct=self.initial_checkpoint_pct
             )
-        # Filter out params not in constructor signature
         accepted_args = set(signature(self.strategy_cls.__init__).parameters)
         strategy_params = {k: v for k, v in strategy_params.items() if k in accepted_args}
         self.strategy = self.strategy_cls(**strategy_params)
@@ -250,6 +255,8 @@ class WalkForwardBacktester:
                     stop_loss_pct=self.vema_stop_loss_pct or 0.5,
                     target_pct=self.vema_target_pct or 0.8,
                     vol_window=self.vema_vol_window or 20,
+                    ema_fast=self.vema_ema_fast or 9,
+                    ema_slow=self.vema_ema_slow or 21,
                     daily_loss_cap=self.vema_daily_loss_cap or 0.01,
                 )
             else:
@@ -265,23 +272,39 @@ class WalkForwardBacktester:
             best_stats = None
             if self.param_optimization and hasattr(strategy, "fit"):
                 def trial_print_callback(trial_num, params, score):
-                    msg = f"[Win {idx+1} Trial {trial_num}] Params={params} | Sharpe={score:.5f}"
+                    msg = f"[Win {idx+1} Trial {trial_num}] Params={params} | Score={score:.5f}"
                     print(msg)
                     self._logger.info(msg)
+                vema_param_grid = None
+                if self.strategy_key == "vema.ema.cross":
+                    vema_param_grid = {
+                        "stop_loss_pct": [0.4, 0.5, 0.6],
+                        "target_pct": [0.7, 0.8, 0.9],
+                        "vol_window": [15, 20, 25],
+                        "ema_fast": [7, 8, 9],
+                        "ema_slow": [20, 21, 26],
+                    }
                 best_params, best_stats = strategy.fit(
                     train_df,
-                    param_grid=self.param_grid,
+                    param_grid=(vema_param_grid if vema_param_grid else self.param_grid),
                     sampler=self.param_sampler,
                     n_trials=self.n_trials,
                     n_random_trials=self.n_random_trials,
                     prev_best_params=prev_best_params,
                     print_callback=trial_print_callback,
                 )
-                print(f"[Walkforward window {idx+1}] Best parameters: {strategy.params_to_str(best_params)}")
+                # ----------- ENSURE ALL KEYS PRESENT FOR CONSISTENT LOGGING -----------
+                if hasattr(strategy, "param_keys"):
+                    for k in strategy.param_keys:
+                        if k not in best_params:
+                            best_params[k] = getattr(strategy, k, "?")
+                strategy.set_params(**best_params)
+                param_str = strategy.params_to_str(best_params)
                 param_log.append(dict(window=idx+1, train_start=str(train_start), test_start=str(test_start),
                                      best_params=best_params))
-                strategy.set_params(**best_params)
                 prev_best_params = best_params
+            else:
+                param_str = ""
             signals = strategy.generate_signals(test_df)
             test_df = test_df.reset_index(drop=True)
             signals = signals.reset_index(drop=True)
@@ -327,7 +350,7 @@ class WalkForwardBacktester:
                 "gross_loss": gross_loss,
                 "max_drawdown": max_drawdown,
                 "capital_end": capital,
-                "best_params": strategy.params_to_str(best_params) if best_params else "",
+                "best_params": param_str,
                 "train_stats": best_stats
             }
             results_per_window.append(window_result)
@@ -335,12 +358,12 @@ class WalkForwardBacktester:
             num_trades = window_result.get("num_trades", 0)
             winrate = win / num_trades if num_trades > 0 else 0.0
             winrate_log.append(
-                f"Window {idx+1} | Win Rate: {winrate:.2%} | Best Params: {window_result['best_params']}"
+                f"Window {idx+1} | Win Rate: {winrate:.2%} | Best Params: {param_str}"
             )
 
             summary_msg = (f"Window {idx+1}: {train_start.date()} - {test_start.date()} | "
                            f"Trades: {len(trades)}, P/L: {gross_profit-gross_loss:.2f}, "
-                           f"Best Params: {strategy.params_to_str(best_params) if best_params else 'N/A'}")
+                           f"Best Params: {param_str if param_str else 'N/A'}")
             print(summary_msg)
             self._logger.info(summary_msg)
 

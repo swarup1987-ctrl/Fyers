@@ -171,6 +171,12 @@ def open_backtest_window(parent):
     Label(vema_frame, text="VEMA Daily Loss Cap %:").pack(side=LEFT, padx=5)
     vema_daily_loss_var = StringVar(value="0.01")
     Entry(vema_frame, width=7, textvariable=vema_daily_loss_var).pack(side=LEFT, padx=2)
+    Label(vema_frame, text="VEMA EMA Fast:").pack(side=LEFT, padx=5)
+    vema_ema_fast_var = StringVar(value="9")
+    Entry(vema_frame, width=5, textvariable=vema_ema_fast_var).pack(side=LEFT, padx=2)
+    Label(vema_frame, text="VEMA EMA Slow:").pack(side=LEFT, padx=5)
+    vema_ema_slow_var = StringVar(value="21")
+    Entry(vema_frame, width=5, textvariable=vema_ema_slow_var).pack(side=LEFT, padx=2)
 
     opt_frame = Frame(win)
     opt_frame.pack(pady=10)
@@ -287,10 +293,20 @@ def open_backtest_window(parent):
                 daily_loss = float(vema_daily_loss_var.get())
             except Exception:
                 daily_loss = 0.01
+            try:
+                ema_fast = int(vema_ema_fast_var.get())
+            except Exception:
+                ema_fast = 9
+            try:
+                ema_slow = int(vema_ema_slow_var.get())
+            except Exception:
+                ema_slow = 21
             active_strategy_instance = VEMAStrategy(
                 stop_loss_pct=stop_loss,
                 target_pct=target,
                 vol_window=vol_window,
+                ema_fast=ema_fast,
+                ema_slow=ema_slow,
                 daily_loss_cap=daily_loss
             )
             result_label.config(text="Strategy 'vema.ema.cross' loaded and ready.", fg="green")
@@ -366,6 +382,8 @@ def open_backtest_window(parent):
         vema_target_str = vema_target_var.get().strip()
         vema_vol_window_str = vema_vol_window_var.get().strip()
         vema_daily_loss_str = vema_daily_loss_var.get().strip()
+        vema_ema_fast_str = vema_ema_fast_var.get().strip()
+        vema_ema_slow_str = vema_ema_slow_var.get().strip()
 
         if not symbol:
             messagebox.showwarning("Warning", "Please select a symbol.")
@@ -423,6 +441,8 @@ def open_backtest_window(parent):
         vema_target = None
         vema_vol_window = None
         vema_daily_loss = None
+        vema_ema_fast = None
+        vema_ema_slow = None
         if strategy_key == "vema.ema.cross":
             try:
                 vema_stop_loss = float(vema_stop_loss_str)
@@ -448,6 +468,18 @@ def open_backtest_window(parent):
                     raise ValueError
             except Exception:
                 vema_daily_loss = 0.01
+            try:
+                vema_ema_fast = int(vema_ema_fast_str)
+                if vema_ema_fast <= 0:
+                    raise ValueError
+            except Exception:
+                vema_ema_fast = 9
+            try:
+                vema_ema_slow = int(vema_ema_slow_str)
+                if vema_ema_slow <= 0:
+                    raise ValueError
+            except Exception:
+                vema_ema_slow = 21
 
         progress_win = Toplevel(win)
         progress_win.title("Backtest Progress")
@@ -507,6 +539,8 @@ def open_backtest_window(parent):
                         "vema_target_pct": vema_target,
                         "vema_vol_window": vema_vol_window,
                         "vema_daily_loss_cap": vema_daily_loss,
+                        "vema_ema_fast": vema_ema_fast,
+                        "vema_ema_slow": vema_ema_slow,
                     })
                 backtester = WalkForwardBacktester(
                     strategy_key=strategy_key,

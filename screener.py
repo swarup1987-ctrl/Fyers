@@ -186,7 +186,7 @@ class Screener(threading.Thread):
                 return
 
             # Use correct flag prefixes: WEEKLY_ or MONTHLY_
-            prefix = f"{period.upper()}LY"  # "week" -> "WEEKLY", "month" -> "MONTHLY"
+            prefix = "WEEKLY" if period == "week" else "MONTHLY"
 
             # --- High Logic ---
             high_near_flag = f"{prefix}_HIGH_NEAR"

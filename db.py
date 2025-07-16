@@ -170,7 +170,6 @@ def get_high_low_for_last_n_sessions(symbol: str, n: int, db_path: str = DB_PATH
     if not dates:
         conn.close()
         return (None, None, 0)
-    # Query max/min ltp for these sessions
     placeholders = ",".join(["?"] * len(dates))
     query = f"""
         SELECT MAX(ltp), MIN(ltp), COUNT(DISTINCT date((exch_feed_time + 19800), 'unixepoch'))
@@ -188,10 +187,54 @@ def get_high_low_for_last_n_sessions_all_symbols(n: int, db_path: str = DB_PATH)
     """
     Return a dict: {symbol: {"high": ..., "low": ..., "num_sessions": ...}} for all symbols in the last n trading sessions.
     If no data for a symbol, "high" and "low" will be None.
+    This version is highly optimized for performance.
     """
-    symbols = get_all_symbols(db_path)
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    # Get the last n unique trading dates (across all symbols)
+    cursor.execute(
+        """
+        SELECT DISTINCT date((exch_feed_time + 19800), 'unixepoch') AS trading_date
+        FROM ticks
+        ORDER BY trading_date DESC
+        LIMIT ?
+        """,
+        (n,)
+    )
+    dates = [row[0] for row in cursor.fetchall()]
+
     output = {}
-    for symbol in symbols:
-        high, low, num_sessions = get_high_low_for_last_n_sessions(symbol, n, db_path)
+    all_symbols = get_all_symbols(db_path)
+
+    if not dates:
+        # No trading dates found, return None values for all symbols
+        for symbol in all_symbols:
+            output[symbol] = {"high": None, "low": None, "num_sessions": 0}
+        conn.close()
+        return output
+
+    placeholders = ",".join(["?"] * len(dates))
+    query = f"""
+        SELECT
+            symbol,
+            MAX(ltp) AS high,
+            MIN(ltp) AS low,
+            COUNT(DISTINCT date((exch_feed_time + 19800), 'unixepoch')) AS num_sessions
+        FROM ticks
+        WHERE date((exch_feed_time + 19800), 'unixepoch') IN ({placeholders})
+        GROUP BY symbol
+    """
+    cursor.execute(query, (*dates,))
+    results = cursor.fetchall()
+
+    # Initialize output with None values for all symbols
+    for symbol in all_symbols:
+        output[symbol] = {"high": None, "low": None, "num_sessions": 0}
+
+    for row in results:
+        symbol, high, low, num_sessions = row
         output[symbol] = {"high": high, "low": low, "num_sessions": num_sessions}
+
+    conn.close()
     return output
